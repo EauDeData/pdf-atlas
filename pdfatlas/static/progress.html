@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pipeline Progress</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Martian+Mono:wdth,wght@75..112.5,300..600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+<style>
+  .wrap{padding:calc(70px + var(--sat)) var(--g) 60px;max-width:1100px}
+  .big{font-weight:800;font-stretch:125%;font-size:clamp(64px,14vw,220px);line-height:.85;letter-spacing:-.05em}
+  .big small{font-size:.32em;color:var(--dim);letter-spacing:-.02em;margin-left:.1em}
+  .sub{color:var(--dim);margin:14px 0 40px;max-width:60ch}
+  .st{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 16px;padding:16px 0;border-top:1px solid var(--line)}
+  .st h3{font-weight:600;font-size:19px;letter-spacing:-.01em}
+  .st .pc{font-family:var(--mono);font-size:13px}
+  .st .tr{grid-column:1/-1;height:10px;background:repeating-linear-gradient(90deg,var(--line) 0 2px,transparent 2px 4px)}
+  .st .tr i{display:block;height:100%;background:var(--red);transition:width 1s var(--ease-out)}
+  .st .m{grid-column:1/-1;color:var(--faint);display:flex;gap:16px;flex-wrap:wrap}
+  .st .m b{color:var(--dim);font-weight:400}
+  .st svg{grid-column:1/-1;width:100%;height:28px;display:block}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin:40px 0;border-top:1px solid var(--line);padding-top:18px}
+  .grid4 b{display:block;font-family:var(--sans);font-size:30px;font-weight:600;letter-spacing:-.02em;text-transform:none;color:var(--fg);font-stretch:110%}
+  .grid4 div{color:var(--faint)}
+  @media (max-width:700px){.grid4{grid-template-columns:1fr 1fr}}
+  .hw{color:var(--dim);display:grid;gap:6px;border-top:1px solid var(--line);padding-top:16px}
+  .hw .row{display:grid;grid-template-columns:90px minmax(0,1fr) 180px;gap:12px;align-items:center}
+  .hw .tr{height:6px;background:var(--line);position:relative}
+  .hw .tr i{position:absolute;inset:0 auto 0 0;background:var(--faint)}
+  .hw .tr b{position:absolute;inset:0 auto 0 0;background:var(--red)}
+</style>
+</head>
+<body>
+<div class="idxline" id="idxline"><i></i></div>
+<header class="nav"><a class="me mono" href="/"><b>PDF ATLAS</b> <span class="faint">/ pipeline</span></a>
+  <ul class="mono links" style="display:flex"><li><a href="/">← Explorer</a></li></ul></header>
+<main class="wrap">
+  <div class="big" id="pct">0<small>%</small></div>
+  <p class="sub" id="sub">of the corpus is searchable. Updates every 3 s; the explorer works the whole time and grows with it.</p>
+  <div id="stages"></div>
+  <div class="grid4 mono" id="facts"></div>
+  <div class="mono faint cap">Machine share (pinned cores, nice 19)</div>
+  <div class="hw mono" id="hw"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s), fmt = n => (n ?? 0).toLocaleString('en-US');
+const hist = {};   // stage -> [done values] for sparklines
+function spark(vals) {
+  if (vals.length < 2) return '';
+  const d = vals.slice(1).map((v, i) => Math.max(0, v - vals[i]));
+  const m = Math.max(...d, 1), w = 100 / (d.length - 1 || 1);
+  return `<svg viewBox="0 0 100 28" preserveAspectRatio="none"><polyline fill="none" stroke="#4d4d4b" stroke-width="1" vector-effect="non-scaling-stroke"
+    points="${d.map((v, i) => `${i * w},${27 - v / m * 25}`).join(' ')}"/></svg>`;
+}
+async function tick() {
+  try {
+    const p = await (await fetch('/api/progress', {cache: 'no-store'})).json();
+    $('#pct').innerHTML = `${(p.indexed_pct || 0).toFixed(1)}<small>%</small>`;
+    $('#idxline i').style.width = (p.indexed_pct || 0) + '%';
+    $('#sub').textContent = `${fmt(p.indexed_docs)} of ${fmt(p.total_docs)} documents are searchable. Updates every 3 s; the explorer works the whole time and grows with it.`;
+    $('#stages').innerHTML = (p.stages || []).map(s => {
+      (hist[s.key] ||= []).push(s.done); if (hist[s.key].length > 120) hist[s.key].shift();
+      return `<section class="st"><h3>${s.label}</h3><span class="pc">${s.pct.toFixed(2)}%</span>
+        <span class="tr"><i style="width:${s.pct}%"></i></span>
+        <span class="m mono"><span><b>${fmt(s.done)}</b> / ${fmt(s.total)} ${s.unit}</span>${s.rate_per_min ? `<span><b>${s.rate_per_min}</b> ${s.unit}/min</span>` : ''}${s.eta_min ? `<span>eta <b>${s.eta_min >= 90 ? (s.eta_min / 60).toFixed(1) + ' h' : Math.round(s.eta_min) + ' min'}</b></span>` : ''}</span>
+        ${spark(hist[s.key])}</section>`;
+    }).join('');
+    const e = p.extracted || {}, d = p.db || {};
+    $('#facts').innerHTML = [['pages read', e.pages], ['figure refs', e.images], ['passages stored', d.chunks], ['figures stored', d.images],
+      ['text-less docs', e.scans], ['read errors', e.errors], ['annoy segments', (d.segments || []).length], ['topic fits', Object.values(p.topics || {}).map(t => 'k=' + t.k).join(' / ') || '—']]
+      .map(([k, v]) => `<div>${k}<b>${typeof v === 'number' ? fmt(v) : v}</b></div>`).join('');
+    const c = p.cpu || {};
+    $('#hw').innerHTML = `<div class="row"><span>CPU</span><span class="tr"><i style="width:${(c.load1 || 0) / (c.ncpu || 1) * 100}%"></i><b style="width:${(c.pct || 0) / 100 / (c.ncpu || 1) * 100}%"></b></span><span>ours ${((c.pct || 0) / 100).toFixed(1)} cores · ${c.threads || 0} thr</span></div>` +
+      (p.gpus || []).map(g => `<div class="row"><span>GPU ${g.index}</span><span class="tr"><i style="width:${g.used / g.total * 100}%"></i><b style="width:${g.ours / g.total * 100}%"></b></span><span>ours ${(g.ours / 1024).toFixed(1)} GB · util ${g.util}%</span></div>`).join('');
+  } catch (err) { $('#sub').textContent = 'Pipeline monitor offline…'; }
+  setTimeout(tick, 3000);
+}
+tick();
+</script>
+</body>
+</html>

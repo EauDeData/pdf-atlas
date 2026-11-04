@@ -1,0 +1,34 @@
+{
+     "sources": [
+          {
+               "name": "theses",
+               "path": "/data/pdfs/theses",
+               "exclude": ["*_draft*", "tmp"],
+               "metadata": {
+                    "type": "jsonl",
+                    "path": "/data/pdfs/theses/metadata.jsonl",
+                    "key": "file",
+                    "fields": {"title": "title", "authors": "creator", "date": "issued", "url": "handle_url"}
+               }
+          },
+          {
+               "name": "arxiv",
+               "path": "/data/pdfs/arxiv",
+               "metadata": {
+                    "type": "sqlite",
+                    "path": "/data/pdfs/arxiv/manifest.db",
+                    "query": "SELECT filepath AS file, title, authors, published AS date, abstract, pdf_url AS url FROM papers"
+               }
+          },
+          {
+               "name": "reports",
+               "path": "/data/pdfs/reports",
+               "recursive": false,
+               "metadata": {"type": "csv", "path": "/data/pdfs/reports/index.csv", "key": "filename"}
+          },
+          {
+               "name": "misc",
+               "path": "/data/pdfs/misc"
+          }
+     ]
+}

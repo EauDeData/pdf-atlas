@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PDF Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Martian+Mono:wdth,wght@75..112.5,300..600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css?v=2">
+</head>
+<body>
+<script>document.documentElement.classList.add('js')</script>
+
+<!-- live indexing line: the corpus keeps growing while you browse -->
+<div class="idxline" id="idxline" aria-hidden="true"><i></i></div>
+
+<header class="nav">
+  <a class="me mono" href="#top"><b>PDF ATLAS</b> <span class="faint" id="navtitle"></span></a>
+  <button class="idxchip mono" id="idxchip" aria-haspopup="dialog" aria-controls="progress">
+    <span class="dot"></span><span id="idxtext">connecting…</span>
+  </button>
+  <ul class="mono links">
+    <li><a href="#search">§01 Search</a></li>
+    <li><a href="#topics">§02 Topics</a></li>
+    <li><a href="#collections">§03 Collections</a></li>
+    <li><a href="#browse">§04 Browse</a></li>
+  </ul>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <h1>
+      <span class="ln"><span id="t1">PDF</span></span>
+      <span class="ln"><span id="t2">Atlas</span></span>
+    </h1>
+    <div class="hero-row">
+      <p>Every PDF in the collection, read straight from its object tree (no OCR, no layout model), embedded, clustered and mapped.
+        <b id="hero-count">…</b></p>
+      <div class="hero-links mono">
+        <a href="#search"><span>↓</span> Search passages</a>
+        <a href="#search" data-mode="image"><span>↓</span> Search images</a>
+        <a href="/progress" target="_blank"><span>↗</span> Pipeline</a>
+      </div>
+    </div>
+
+    <figure class="plot" id="plot">
+      <canvas id="map" aria-label="Map of documents: each dot is one PDF, colored by topic"></canvas>
+      <div class="map-ui mono">
+        <div class="seg" role="tablist" id="mapkind">
+          <button role="tab" aria-selected="true" data-k="docs">Documents</button>
+          <button role="tab" aria-selected="false" data-k="images">Images</button>
+        </div>
+        <div class="seg" id="mapcolor">
+          <button aria-pressed="true" data-c="topic">Topic</button>
+          <button aria-pressed="false" data-c="collection">Collection</button>
+        </div>
+        <button class="ghost" id="mapreset" title="Reset zoom (0)">Reset ⟲</button>
+      </div>
+      <div class="card" id="card"><div class="card-in"></div></div>
+      <div class="map-empty mono" id="mapempty">Waiting for the first topic fit…</div>
+    </figure>
+    <figcaption class="hero-cap mono">
+      <span>Fig. 1 — <b id="map-n">0</b> <span id="map-what">documents</span> placed by meaning. Hover to retrieve · click to open · scroll to zoom · drag to pan</span>
+      <span class="key" id="map-key"></span>
+    </figcaption>
+  </section>
+
+  <!-- §01 SEARCH ======================================================== -->
+  <section class="sec" id="search">
+    <div class="sec-h"><span class="mono red">§01</span><h2>Search</h2><span class="rule"></span></div>
+
+    <form class="q" id="qform" autocomplete="off" role="search">
+      <input id="q" type="search" placeholder="Ask the corpus anything, in any language" aria-label="Search query" enterkeyhint="search">
+      <kbd class="mono">/</kbd>
+    </form>
+
+    <div class="controls">
+      <div class="seg mono" id="modes" role="tablist" aria-label="Search mode">
+        <button role="tab" data-m="semantic" aria-selected="true">Passages</button>
+        <button role="tab" data-m="docs" aria-selected="false">Documents</button>
+        <button role="tab" data-m="image" aria-selected="false">Images</button>
+        <button role="tab" data-m="keyword" aria-selected="false">Keyword</button>
+      </div>
+      <div class="filters mono">
+        <label class="sel"><span>Collection</span><select id="f-coll"><option value="">All</option></select></label>
+        <label class="sel"><span>Topic</span><select id="f-topic"><option value="">All</option></select></label>
+        <label class="sel yr"><span>Years</span><input id="f-y0" inputmode="numeric" placeholder="1800" maxlength="4"><i>–</i><input id="f-y1" inputmode="numeric" placeholder="2026" maxlength="4"></label>
+        <button type="button" class="ghost" id="f-clear" hidden>Clear ✕</button>
+      </div>
+    </div>
+    <div class="modehint mono" id="modehint"></div>
+
+    <div class="status mono" id="status" aria-live="polite"></div>
+    <ol class="results" id="results"></ol>
+    <div class="grid" id="igrid"></div>
+    <div class="sentinel mono" id="sentinel"></div>
+  </section>
+
+  <!-- §02 TOPICS ========================================================= -->
+  <section class="sec" id="topics">
+    <div class="sec-h"><span class="mono red">§02</span><h2>Topics</h2><span class="rule"></span></div>
+    <p class="lede">Found a posteriori: k-means on document vectors, named by the words that are frequent inside a cluster and rare outside it (c-TF-IDF). Image clusters are named zero-shot by SigLIP. The topics are re-fitted as the corpus grows. <span class="mono faint" id="topic-ver"></span></p>
+    <div class="seg mono" id="topickind">
+      <button aria-pressed="true" data-k="text">Text topics</button>
+      <button aria-pressed="false" data-k="image">Image topics</button>
+    </div>
+    <div class="topics" id="topiclist"></div>
+  </section>
+
+  <!-- §03 COLLECTIONS ===================================================== -->
+  <section class="sec" id="collections">
+    <div class="sec-h"><span class="mono red">§03</span><h2>Collections</h2><span class="rule"></span></div>
+    <div class="cols2">
+      <div>
+        <div class="mono faint cap">Documents indexed per source · <span class="red">█</span> indexed <span class="faint">░</span> pending</div>
+        <ul class="bars" id="collbars"></ul>
+      </div>
+      <div>
+        <div class="mono faint cap">Fig. 2 — Documents per year (from metadata or title)</div>
+        <canvas id="years" height="220"></canvas>
+        <dl class="facts mono" id="facts"></dl>
+      </div>
+    </div>
+  </section>
+
+  <!-- §04 BROWSE ========================================================= -->
+  <section class="sec" id="browse">
+    <div class="sec-h"><span class="mono red">§04</span><h2>Browse</h2><span class="rule"></span></div>
+    <p class="lede">The catalogue, 40 rows at a time (keyset pagination: the page never holds the whole corpus). Uses the Collection / Topic / Years filters from §01.</p>
+    <div class="tablewrap">
+      <table class="tbl">
+        <thead class="mono"><tr><th>#</th><th>Title</th><th>Collection</th><th>Year</th><th>Pages</th><th>Images</th><th>Topic</th></tr></thead>
+        <tbody id="browsebody"></tbody>
+      </table>
+    </div>
+    <div class="sentinel mono" id="bsentinel"></div>
+  </section>
+
+  <footer class="foot mono">
+    <span>Source PDFs are read in place and never copied. Page images are rendered on demand and never stored.</span>
+    <span id="models"></span>
+  </footer>
+</main>
+
+<!-- document viewer ====================================================== -->
+<div class="viewer" id="viewer" role="dialog" aria-modal="true" aria-labelledby="v-title" hidden>
+  <div class="v-scrim" data-close></div>
+  <div class="v-panel">
+    <header class="v-head">
+      <div class="v-meta">
+        <div class="mono faint" id="v-sub"></div>
+        <h3 id="v-title"></h3>
+        <div class="mono v-links" id="v-links"></div>
+      </div>
+      <button class="ghost close mono" data-close aria-label="Close (Esc)">Esc ✕</button>
+    </header>
+    <div class="v-body">
+      <nav class="v-strip" id="v-strip" aria-label="Pages"></nav>
+      <div class="v-page">
+        <div class="v-pagebar mono">
+          <button class="ghost" id="v-prev" aria-label="Previous page">←</button>
+          <span id="v-pno"></span>
+          <button class="ghost" id="v-next" aria-label="Next page">→</button>
+          <span class="grow"></span>
+          <button class="ghost" id="v-textbtn" aria-pressed="false">Text</button>
+        </div>
+        <div class="v-canvas" id="v-canvas"><img id="v-img" alt=""><div class="v-boxes" id="v-boxes"></div></div>
+        <div class="v-text" id="v-text" hidden></div>
+      </div>
+      <aside class="v-side">
+        <div class="mono faint cap" id="v-imgcap">Images in this document</div>
+        <div class="v-imgs" id="v-imgs"></div>
+        <div class="mono faint cap">Similar documents</div>
+        <ol class="v-sim" id="v-sim"></ol>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<!-- pipeline progress ==================================================== -->
+<div class="drawer" id="progress" role="dialog" aria-labelledby="p-title" hidden>
+  <div class="drawer-in">
+    <div class="sec-h"><span class="mono red">§00</span><h2 id="p-title">Pipeline</h2><span class="rule"></span>
+      <button class="ghost mono" data-pclose>✕</button></div>
+    <div id="p-body"></div>
+  </div>
+</div>
+
+<div class="toast mono" id="toast" role="status"></div>
+<script src="/static/app.js?v=2"></script>
+</body>
+</html>

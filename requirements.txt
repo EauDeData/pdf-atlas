@@ -1,0 +1,14 @@
+# PDF Atlas — tested with Python 3.10, torch 2.9 (CUDA 12.8)
+torch>=2.3
+pymupdf>=1.24
+sentence-transformers>=3.0
+transformers>=4.51
+annoy>=1.17
+numpy
+pandas
+pyarrow
+scikit-learn
+umap-learn
+pillow
+fastapi
+uvicorn[standard]

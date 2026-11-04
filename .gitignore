@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+atlas-data/
+*.sqlite*
+*.parquet
+*.npy
+*.ann
+*.f16
+logs/
+.env
