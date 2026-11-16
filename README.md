@@ -39,6 +39,15 @@ Nothing in it is domain-specific: point it at folders of PDFs.
   page text with "similar passages", similar documents, link to the PDF and its source URL.
 * **Browse**: the catalogue with collection / topic / year filters.
 * **Live progress**: a bar in the explorer, a `/progress` page and a terminal dashboard.
+* **Labels (lasso)**: draw a free-hand region on the map (**Lasso ✎**, `L`, or Shift+drag), name it,
+  and every document inside it gets that label. On the figure map, a figure inside the region labels
+  its document. Labels apply to whole PDFs (stored by file path), a document can have any number of
+  them, and you can add or remove them one document at a time in the viewer. §05 lists them, lights a
+  label up on the map, undoes a selection and exports CSV. They are stored in
+  `$PDFATLAS_WORK/labels.sqlite` (see `pdfatlas/labels.py` for the schema).
+* **New PDFs are picked up**: a watcher re-lists the sources every 2 minutes. When PDFs have been
+  added (to an existing folder, or as a new collection folder), it indexes just those, on the GPUs
+  you named.
 
 Everything the browser loads is paginated server-side: search results are offset slices of a cached
 ranked list (20 per page, 36 for images), and browsing uses keyset cursors (40 rows). The page never
@@ -59,6 +68,23 @@ export HF_HOME=/local/disk/hf_cache       # models are downloaded on first use
 ./run.sh attach     # live progress (window 0); Ctrl-b n / p to cycle through the stages
 # explorer: http://<host>:8800    progress: http://<host>:8800/progress
 ```
+
+### Adding PDFs later
+
+Copy them into the source folders. The `watch` window (`pdfatlas/watch.py`, on by default, `WATCH=0`
+to disable) picks them up once the initial run is finished. A file counts as new once it has stopped
+changing and ends in `%%EOF`, so a half-copied PDF is never read. It is added to the catalogue with a
+new doc_id and its own extraction batch. Then extract → embed → ingest → topics run on those batches
+only. The GPUs are held only during that run:
+
+```bash
+TEXT_GPUS="2 3" IMAGE_GPU=1 ./run.sh restart-watch   # physical indices (as in nvitop / nvidia-smi)
+./run.sh restart-watch                               # none given: idle GPUs are picked at each run
+```
+
+New documents get the nearest existing topic and a `umap.transform` position. Once the collection has
+grown by `PDFATLAS_REFIT_GROWTH` (default 0.5 = 50%) since the last fit, topics and the map are
+refitted. Deleted or modified PDFs are not detected.
 
 `./run.sh stop` stops everything. Every stage resumes from what is on disk, so stop/start is
 always safe. `./run.sh restart-server` / `restart-extract` restart a single stage (e.g. after
@@ -95,6 +121,8 @@ abstract), so scanned PDFs without a text layer are still findable by title. See
 | embed images | `pdfatlas/embed_images.py` | SigLIP-2. Pixels are decoded from the xref in RAM by a CPU pool, resized, embedded and dropped. → `emb/img_*.npy` |
 | ingest | `pdfatlas/ingest.py` | appends to SQLite (WAL, so readers never block), FTS5 and append-only fp16 vector files. Every 400k text / 200k image vectors are sealed into an immutable Annoy segment. Crash-safe: on restart the vector files are trimmed back to what the DB committed. |
 | topics | `pdfatlas/topics.py` | refits at milestones (1.5k, 8k, 30k, 80k docs, then once at the end). Between refits, new documents get the nearest centroid and `umap.transform` coordinates, so the map grows instead of reshuffling. |
+| watch | `pdfatlas/watch.py` | polls the sources for new PDFs, appends them to the catalogue + batch manifest (`shards/BATCHES.parquet`), runs the stages above on the new batches only |
+| labels | `pdfatlas/labels.py` | user labels per document path in `labels.sqlite` (separate from the index, so the pipeline never contends with it and labels survive a rebuild) |
 | progress | `pdfatlas/progress.py` | `progress.json` (served at `/api/progress`) + terminal dashboard, including our own CPU/GPU usage |
 | server | `pdfatlas/server.py` | FastAPI. Vector search = Annoy over sealed segments + brute force over the unsealed tail, merged. Pages and figure crops are rendered on demand by MuPDF in worker processes (in-memory LRU, nothing written). |
 | UI | `pdfatlas/static/` | vanilla JS, no build step. |
@@ -110,6 +138,9 @@ abstract), so scanned PDFs without a text layer are still findable by title. See
 | `GET /api/render/{doc}/{page}.jpg?w=`, `/api/image/{id}.jpg?w=`, `/api/pdf/{doc}` | rendered page, figure crop, original PDF |
 | `GET /api/map/{docs\|images}.bin` | `u32 n · i32 ids[n] · u16 xy[n,2] · u8 topic+1[n] · u8 collection[n]` |
 | `GET /api/stats`, `/api/progress`, `/api/topic/{docs\|images}/{k}` | |
+| `POST /api/labels` `{label, kind: docs\|images, ids: [map point ids], polygon?}` | label the documents owning those points |
+| `GET /api/labels`, `/api/labels/docs?label=`, `/api/labels.csv` | summary + recent selections, current doc_ids of a label, export |
+| `DELETE /api/labels?selection=ID` / `?label=X&doc_id=N` / `?label=X` | undo a lasso / remove from one document / remove everywhere |
 
 ## Being a good neighbour on a shared machine
 
@@ -138,7 +169,8 @@ On the reference run (128 cores, 4 GPUs) the whole pipeline used about 25 cores 
 | `PDFATLAS_IMAGE_MODEL` | `google/siglip2-base-patch16-256` | |
 | `PDFATLAS_IMAGE_CONCEPTS` | built-in, domain-neutral | text file, one concept per line, used to name image clusters |
 | `PDFATLAS_THREADS` | 2 | per-process library thread cap |
-| `PY`, `PORT`, `CORES`, `EXTRACT_CORES`, `EXTRACT_WORKERS`, `IMAGE_WORKERS`, `TEXT_GPUS`, `IMAGE_GPU`, `MAX_TEXT_GPUS`, `SESSION` | see `run.sh` | launcher |
+| `PY`, `PORT`, `CORES`, `EXTRACT_CORES`, `EXTRACT_WORKERS`, `IMAGE_WORKERS`, `TEXT_GPUS`, `IMAGE_GPU`, `MAX_TEXT_GPUS`, `SESSION`, `WATCH`, `WATCH_INTERVAL` | see `run.sh` | launcher |
+| `PDFATLAS_REFIT_GROWTH` | 0.5 | after the final fit, refit topics/map when the corpus grows by this fraction (0 = never) |
 
 Extraction limits (pages per document, chunk size, figure size thresholds) are in
 `pdfatlas/config.py`.

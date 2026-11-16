@@ -93,6 +93,36 @@ def year_of(s):
     return int(m.group(1)) if m else None
 
 
+def make_row(path, src, meta):
+    fn = os.path.basename(path)
+    m = meta.get(fn, {})
+    title = (m.get("title") or "").strip() or title_from_name(fn)
+    return dict(
+        path=path, collection=src["name"], file=fn, bytes=os.path.getsize(path),
+        title=title[:400], authors=m.get("authors", "")[:400], url=m.get("url", ""),
+        abstract=m.get("abstract", "")[:4000],
+        year=year_of(m.get("year") or m.get("date")) or year_of(title))
+
+
+def write_catalog(df):
+    """Atomic: the server, progress monitor and watcher read it while it is being replaced."""
+    df = df.copy()
+    df["year"] = df["year"].astype("Int64")
+    tmp = C.CATALOG.with_suffix(".tmp.parquet")
+    df.to_parquet(tmp, index=False)
+    os.replace(tmp, C.CATALOG)
+
+
+def append(rows):
+    """Add PDFs to an existing catalogue with fresh doc_ids (existing ids never change). -> new rows."""
+    cat = pd.read_parquet(C.CATALOG)
+    new = pd.DataFrame(rows)
+    d0 = int(cat.doc_id.max()) + 1 if len(cat) else 0
+    new.insert(0, "doc_id", range(d0, d0 + len(new)))
+    write_catalog(pd.concat([cat, new[cat.columns]], ignore_index=True))
+    return new
+
+
 def build():
     C.WORK.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -100,19 +130,11 @@ def build():
         meta = read_metadata(src["metadata"])
         n0 = len(rows)
         for path in iter_pdfs(src):
-            fn = os.path.basename(path)
-            m = meta.get(fn, {})
-            title = (m.get("title") or "").strip() or title_from_name(fn)
-            rows.append(dict(
-                path=path, collection=src["name"], file=fn, bytes=os.path.getsize(path),
-                title=title[:400], authors=m.get("authors", "")[:400], url=m.get("url", ""),
-                abstract=m.get("abstract", "")[:4000],
-                year=year_of(m.get("year") or m.get("date")) or year_of(title)))
+            rows.append(make_row(path, src, meta))
         print(f"{src['name']:20s} {len(rows) - n0:8d} pdfs  ({len(meta)} metadata rows)", flush=True)
     df = pd.DataFrame(rows).sort_values(["collection", "path"]).reset_index(drop=True)
-    df["year"] = df["year"].astype("Int64")
     df.insert(0, "doc_id", range(len(df)))
-    df.to_parquet(C.CATALOG, index=False)
+    write_catalog(df)
     print("total", len(df), "->", C.CATALOG)
 
 

@@ -10,6 +10,7 @@ import json
 import os
 import pickle
 import re
+import sqlite3
 import time
 from collections import Counter
 
@@ -25,6 +26,13 @@ if os.environ.get("PDFATLAS_SMALL"):  # smoke tests
     MILESTONES, IMG_MAP_MOD = {"text": [100], "image": [500]}, 2
 FINAL = 10**12  # milestone id of the last refit (after everything is ingested)
 UMAP_FIT_MAX = 50_000
+# after the final fit, PDFs added later (pdfatlas.watch) are placed on the existing map; once the corpus
+# has grown by this fraction since the last fit, topics and map are refitted (0 = never)
+REFIT_GROWTH = float(os.environ.get("PDFATLAS_REFIT_GROWTH", 0.5))
+
+
+def grew(model, n):
+    return bool(REFIT_GROWTH and model.get("n") and n > model["n"] * (1 + REFIT_GROWTH))
 
 STOP = set("""
 a an and are as at be been but by can could did do does for from had has have he her his how i if in into is it its
@@ -227,7 +235,7 @@ def fit_image(con, milestone):
     sim = cent @ T.T
     sim = sim - sim.mean(0, keepdims=True)
     labels = [[IMG_CONCEPTS[j] for j in np.argsort(-sim[t])[:3]] for t in range(k)]
-    _save("image_model.pkl", dict(cent=cent, umap=um, lo=lo, hi=hi, milestone=milestone))
+    _save("image_model.pkl", dict(cent=cent, umap=um, lo=lo, hi=hi, milestone=milestone, n=int(len(X))))
     write_meta("image", dict(labels=labels, k=k, colors=colors(k), fitted_on=int(len(ok)), milestone=milestone,
                              version=int(time.time()), counts=np.bincount(top[ok], minlength=k).tolist()))
     print(f"image refit @ {len(ok)} imgs, k={k} in {time.time()-t0:.0f}s", flush=True)
@@ -252,6 +260,19 @@ def assign_image(con, model):
 
 
 def main():
+    """Retry on lock contention: ingest holds the write lock for a long time during its final
+    FTS optimize, and the pending assignments are simply picked up again afterwards."""
+    while True:
+        try:
+            return run()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e):
+                raise
+            print("database busy (another writer holds it), retrying in 60 s", flush=True)
+            time.sleep(60)
+
+
+def run():
     C.MAP.mkdir(parents=True, exist_ok=True)
     while not C.DB.exists():
         time.sleep(30)
@@ -262,7 +283,7 @@ def main():
         n_docs = 0 if V is None else len(V)
         tm = _load("text_model.pkl")
         due = [m for m in MILESTONES["text"] if n_docs >= m and (tm is None or tm["milestone"] < m)]
-        if final and (tm is None or tm["milestone"] != FINAL):
+        if final and (tm is None or tm["milestone"] != FINAL or grew(tm, n_docs)):
             due = [FINAL]
         if due:
             fit_text(con, due[-1]); tm = _load("text_model.pkl")
@@ -274,7 +295,7 @@ def main():
         n_img = 0 if X is None else len(X)
         im = _load("image_model.pkl")
         due = [m for m in MILESTONES["image"] if n_img >= m and (im is None or im["milestone"] < m)]
-        if final and n_img and (im is None or im["milestone"] != FINAL):
+        if final and n_img and (im is None or im["milestone"] != FINAL or grew(im, n_img)):
             due = [FINAL]
         if due:
             fit_image(con, due[-1]); im = _load("image_model.pkl")

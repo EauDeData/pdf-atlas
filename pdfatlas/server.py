@@ -18,8 +18,10 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from . import config as C
+from . import admin, labels
 
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="PDF Atlas")
@@ -271,12 +273,14 @@ def stats():
         "FROM docs GROUP BY collection ORDER BY n DESC")]
     years = [dict(r) for r in con.execute(
         "SELECT year, count(*) n FROM docs WHERE year BETWEEN 1700 AND 2030 GROUP BY year ORDER BY year")]
-    if "cat" not in _STATS_CAT:
+    mt = C.CATALOG.stat().st_mtime if C.CATALOG.exists() else 0  # the watcher appends to the catalogue
+    if _STATS_CAT.get("mtime") != mt:
         import pandas as pd
         _STATS_CAT["cat"] = pd.read_parquet(C.CATALOG, columns=["collection"]).collection.value_counts().to_dict()
+        _STATS_CAT["mtime"] = mt
     out = dict(catalog_collections=_STATS_CAT["cat"], docs=r[0], pages=r[1] or 0, images=r[2] or 0, bytes=r[3] or 0, chunks=S.text.committed(),
                image_vectors=S.image.committed(), collections=colls, years=years, topics=topics(),
-               title=C.TITLE, all_collections=C.collections(), models=dict(text=C.TEXT_MODEL, image=C.IMAGE_MODEL))
+               title=C.TITLE, all_collections=_collections(), models=dict(text=C.TEXT_MODEL, image=C.IMAGE_MODEL))
     _STATS[:] = [time.time(), out]
     return out
 
@@ -286,8 +290,10 @@ _COLLS = []
 
 
 def _collections():
-    if not _COLLS:
-        _COLLS.extend(C.collections())
+    # append-only, so colour indices of existing collections never move when the watcher adds one
+    for c in C.collections():
+        if c not in _COLLS:
+            _COLLS.append(c)
     return _COLLS
 
 
@@ -551,6 +557,7 @@ def doc(doc_id: int):
     imgs = [dict(x) for x in con.execute("SELECT id, page, x0,y0,x1,y1,w,h, topic FROM images WHERE doc_id=? AND ok=1 ORDER BY page, y0 LIMIT 400", (doc_id,))]
     d["text_pages"] = pages
     d["images"] = imgs
+    d["labels"] = labels.for_path(r["path"])
     return d
 
 
@@ -558,6 +565,134 @@ def doc(doc_id: int):
 def doc_text(doc_id: int, page: int):
     rows = db().execute("SELECT id, text FROM chunks WHERE doc_id=? AND page=? AND kind=0 ORDER BY id", (doc_id, page)).fetchall()
     return dict(chunks=[dict(id=r[0], text=r[1]) for r in rows])
+
+
+# ----------------------------------------------------------------------------- labels (lasso on the map)
+class LabelIn(BaseModel):
+    label: str
+    kind: str = "docs"                       # which map the ids come from: docs (doc ids) | images (image ids)
+    ids: list[int] = Field(max_length=2_000_000)
+    polygon: list[list[float]] | None = None  # the lasso, in map coordinates (0..1), kept for the record
+    note: str = ""
+
+
+def _docs_of(kind, ids):
+    """map point ids -> {doc_id: path} of the documents that own them."""
+    con, out = db(), {}
+    ids = sorted({int(i) for i in ids})
+    q = ("SELECT doc_id, path FROM docs WHERE doc_id IN ({})" if kind == "docs" else
+         "SELECT DISTINCT d.doc_id, d.path FROM images i JOIN docs d USING(doc_id) WHERE i.id IN ({})")
+    for k in range(0, len(ids), 900):
+        part = ids[k:k + 900]
+        out.update(con.execute(q.format(",".join("?" * len(part))), part).fetchall())
+    return out
+
+
+@app.post("/api/labels")
+def label_add(body: LabelIn):
+    """Attach a label to every document owning one of the given map points (a lasso, or one doc)."""
+    ensure()
+    if body.kind not in ("docs", "images"):
+        raise HTTPException(400, "kind must be docs or images")
+    try:
+        labels.clean_label(body.label)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    docs = _docs_of(body.kind, body.ids)
+    if not docs:
+        raise HTTPException(400, "no indexed documents in the selection")
+    ver = topics().get("text" if body.kind == "docs" else "image", {}).get("version")
+    poly = [[round(x, 5), round(y, 5)] for x, y in (body.polygon or [])][:2000] or None
+    return labels.add(body.label, body.kind, docs, len(set(body.ids)), poly, ver, body.note[:200])
+
+
+@app.get("/api/labels")
+def label_summary():
+    return labels.summary()
+
+
+@app.get("/api/labels/polygons")
+def label_polygons(kind: str = "docs"):
+    """Saved lassoes for one map. Coordinates are only meaningful on the layout they were drawn on, so
+    lassoes from an earlier topic/map fit are counted but not returned."""
+    ver = topics().get("text" if kind == "docs" else "image", {}).get("version")
+    allp = labels.polygons(kind)
+    cur = [p for p in allp if p["map_version"] == ver]
+    return dict(items=cur, other_layout=len(allp) - len(cur), version=ver)
+
+
+@app.get("/api/labels/docs")
+def label_docs(label: str):
+    """Current doc_ids carrying a label (labels are stored by path, so this survives re-indexing)."""
+    paths, con, out = labels.paths_with(label), db(), []
+    for k in range(0, len(paths), 900):
+        part = paths[k:k + 900]
+        out += [r[0] for r in con.execute(f"SELECT doc_id FROM docs WHERE path IN ({','.join('?' * len(part))})", part)]
+    return dict(label=label, doc_ids=out, n_paths=len(paths))
+
+
+@app.delete("/api/labels")
+def label_remove(label: str | None = None, doc_id: int | None = None, selection: int | None = None):
+    """?selection=ID undoes one lasso · ?label=X&doc_id=N removes X from one document · ?label=X removes X everywhere."""
+    if selection is not None:
+        return dict(removed=labels.remove(selection_id=selection))
+    if label is None:
+        raise HTTPException(400, "label or selection required")
+    path = _path(doc_id) if doc_id is not None else None
+    return dict(removed=labels.remove(label=label, path=path))
+
+
+@app.get("/api/labels.csv")
+def label_csv():
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["path", "label", "doc_id", "first_labeled"])
+    for p, l, d, t in labels.rows():
+        w.writerow([p, l, d, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))])
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=labels.csv"})
+
+
+# ----------------------------------------------------------------------------- watched folders (password-protected)
+class FolderIn(BaseModel):
+    password: str = Field(max_length=256)
+    path: str = Field(max_length=4096)
+    name: str = Field("", max_length=120)
+    exclude: list[str] = Field(default_factory=list, max_length=50)
+
+
+def _admin(password, request):
+    try:
+        admin.verify(password, request.client.host if request.client else "?")
+    except admin.Denied as e:
+        raise HTTPException(e.status, str(e))
+
+
+@app.get("/api/sources")
+def sources():
+    return dict(sources=admin.sources_view(), admin=admin.configured())
+
+
+@app.post("/api/sources")
+def source_add(body: FolderIn, request: Request):
+    """Add a folder to watch (password checked against a server-side hash). Indexed by pdfatlas.watch."""
+    _admin(body.password, request)
+    try:
+        return admin.add_folder(body.path.strip(), body.name.strip(), body.exclude)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/sources/remove")
+def source_remove(body: FolderIn, request: Request):
+    _admin(body.password, request)
+    try:
+        admin.remove_folder(body.path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return dict(removed=body.path)
 
 
 # ----------------------------------------------------------------------------- rendering (separate processes: MuPDF is not thread-safe)
@@ -621,6 +756,9 @@ IMG_HEADERS = {"Cache-Control": "public, max-age=86400, immutable"}
 @app.get("/api/render/{doc_id}/{page}.jpg")
 async def render_page(doc_id: int, page: int, w: int = Query(480, ge=64, le=1800)):
     w = min(1800, (w + 63) // 64 * 64)  # bucket widths -> better cache hits
+    n = db().execute("SELECT n_pages FROM docs WHERE doc_id=?", (doc_id,)).fetchone()
+    if not n or page >= n[0]:  # includes PDFs killed during extraction (n_pages=0): they can hang MuPDF
+        raise HTTPException(404)
     b = await _render_cached(("p", doc_id, page, w), _path(doc_id), page, w, None)
     return Response(b, media_type="image/jpeg", headers=IMG_HEADERS)
 

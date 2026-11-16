@@ -67,6 +67,10 @@ async function pollProgress() {
       growth();
     }
     if (S.lastIndexed === null || p.indexed_docs > S.lastIndexed) S.lastIndexed = p.indexed_docs;
+    // documents get their map position a little after they are indexed (topics stage)
+    const placed = (p.db || {}).topic_docs || 0;
+    if (S.lastPlaced != null && placed > S.lastPlaced) growth();
+    S.lastPlaced = placed;
   } catch (e) { $('#idxtext').textContent = 'pipeline offline'; }
   setTimeout(pollProgress, document.hidden ? 20000 : 5000);
 }
@@ -96,13 +100,15 @@ function openProgress(on) {
 }
 async function pollProgressOnce() { try { renderProgress(await api('/api/progress')); } catch {} }
 
-// called when new documents land: refresh the cheap things, throttled
-let growthT = 0;
+// called when new documents land: refresh the cheap things, throttled to one per 30 s, with a
+// trailing refresh so the last change is never dropped (the server also caches the map for 30 s)
+let growthT = 0, growthTimer = 0;
 function growth() {
-  const now = Date.now();
-  if (now - growthT < 30000) return;
-  growthT = now;
+  const wait = 31000 - (Date.now() - growthT);
+  if (wait > 0) { if (!growthTimer) growthTimer = setTimeout(() => { growthTimer = 0; growth(); }, wait); return; }
+  growthT = Date.now();
   loadStats().then(() => Fig.reload(true));
+  clearTimeout(growth.follow); growth.follow = setTimeout(() => Fig.reload(true), 32000);  // outlive the server's map cache
 }
 
 // ======================================================================= stats / collections / topics
@@ -217,6 +223,11 @@ const Fig = (() => {
   let kind = 'docs', colorBy = 'topic';
   let n = 0, ids, xs, ys, tops, colls, born = new Float32Array(0), known = new Set();
   let view = {s: 1, x: 0, y: 0}, W = 0, H = 0, grid = null, hl = null, hover = -1, raf = 0;
+  // lasso: polygon in map (data) coordinates, so it follows zoom/pan; sel = indices of points inside it
+  let lassoOn = false, poly = null, drawing = false, sel = null, lastPt = null;
+  // lassoes already saved (by anyone) on this map layout: shown while lasso mode is on
+  let saved = [], savedOther = 0, savedTimer = 0;
+  const hue = s => { let h = 0; for (const c of s) h = (h * 31 + c.codePointAt(0)) >>> 0; return h % 360; };
   const PAD = 24;
 
   function resize() {
@@ -225,6 +236,10 @@ const Fig = (() => {
   }
   const sx = i => PAD + (xs[i] * (W - 2 * PAD) - view.x) * view.s + (W - 2 * PAD) * (1 - view.s) / 2;
   const sy = i => 70 + (ys[i] * (H - 70 - PAD) - view.y) * view.s + (H - 70 - PAD) * (1 - view.s) / 2;
+  const toScreen = (x, y) => [PAD + (x * (W - 2 * PAD) - view.x) * view.s + (W - 2 * PAD) * (1 - view.s) / 2,
+                              70 + (y * (H - 70 - PAD) - view.y) * view.s + (H - 70 - PAD) * (1 - view.s) / 2];
+  const toData = (mx, my) => [((mx - PAD - (W - 2 * PAD) * (1 - view.s) / 2) / view.s + view.x) / (W - 2 * PAD),
+                              ((my - 70 - (H - 70 - PAD) * (1 - view.s) / 2) / view.s + view.y) / (H - 70 - PAD)];
 
   async function reload(keepView) {
     let buf;
@@ -247,6 +262,7 @@ const Fig = (() => {
     known = nk; ids = nids; tops = tp; colls = cl; born = nb; n = m;
     if (!keepView) view = {s: 1, x: 0, y: 0};
     buildGrid();
+    if (poly && !drawing) select();
     $('#map-n').textContent = fmt(n);
     $('#mapempty').hidden = n > 0;
     legend(); draw();
@@ -297,6 +313,33 @@ const Fig = (() => {
         const e = 1 - Math.pow(1 - t, 3);
         g.strokeStyle = `rgba(255,59,47,${1 - e})`; g.lineWidth = 1;
         g.beginPath(); g.arc(sx(i), sy(i), 2 + 10 * e, 0, 6.283); g.stroke();
+      }
+      if (lassoOn && saved.length) {
+        g.font = '500 10px "Martian Mono", monospace'; g.lineWidth = 1.2;
+        for (const L of saved) {
+          const h = hue(L.label);
+          g.beginPath();
+          L.polygon.forEach(([x, y], k) => { const [px, py] = toScreen(x, y); k ? g.lineTo(px, py) : g.moveTo(px, py); });
+          g.closePath();
+          g.fillStyle = `hsla(${h} 75% 60% / .10)`; g.fill();
+          g.strokeStyle = `hsl(${h} 75% 62%)`; g.stroke();
+          const [tx, ty] = toScreen(L.bx, L.by);
+          const t = L.label.length > 28 ? L.label.slice(0, 27) + '…' : L.label, tw = g.measureText(t).width;
+          g.fillStyle = 'rgba(10,10,10,.8)'; g.fillRect(tx, ty - 13, tw + 8, 14);
+          g.fillStyle = `hsl(${h} 75% 70%)`; g.fillText(t, tx + 4, ty - 2);
+        }
+      }
+      if (poly && poly.length > 1) {
+        g.beginPath();
+        poly.forEach(([x, y], k) => { const [px, py] = toScreen(x, y); k ? g.lineTo(px, py) : g.moveTo(px, py); });
+        if (!drawing) g.closePath();
+        g.fillStyle = 'rgba(255,59,47,.08)'; g.fill();
+        g.strokeStyle = '#ff3b2f'; g.lineWidth = 1.5; g.setLineDash(drawing ? [4, 4] : []); g.stroke(); g.setLineDash([]);
+        if (sel && sel.length) {
+          g.fillStyle = '#ececea'; g.beginPath();
+          for (const i of sel) { const x = sx(i), y = sy(i); g.rect(x - r / 2 - .5, y - r / 2 - .5, r + 1, r + 1); }
+          g.fill();
+        }
       }
       if (hover >= 0) {
         g.strokeStyle = '#ececea'; g.lineWidth = 1.5;
@@ -361,9 +404,22 @@ const Fig = (() => {
     if (ns === 1) view.x = view.y = 0;
     hideCard(); draw();
   }, {passive: false});
-  cv.addEventListener('pointerdown', e => { drag = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; moved = false; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointerdown', e => {
+    cv.setPointerCapture(e.pointerId);
+    if (lassoOn || e.shiftKey) {   // start a lasso (replaces any pending one)
+      const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+      drawing = true; poly = [toData(mx, my)]; lastPt = [mx, my]; sel = null;
+      $('#lasso').hidden = true; hideCard(); draw();
+      return;
+    }
+    drag = {x: e.clientX, y: e.clientY, vx: view.x, vy: view.y}; moved = false;
+  });
   cv.addEventListener('pointermove', e => {
     const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    if (drawing) {
+      if (Math.hypot(mx - lastPt[0], my - lastPt[1]) >= 3) { poly.push(toData(mx, my)); lastPt = [mx, my]; draw(); }
+      return;
+    }
     if (drag) {
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       if (Math.abs(dx) + Math.abs(dy) > 4) { moved = true; cv.classList.add('grab'); hideCard(); }
@@ -375,6 +431,7 @@ const Fig = (() => {
     if (i !== hover) { hover = i; draw(); clearTimeout(cardTimer); if (i < 0) hideCard(); else cardTimer = setTimeout(() => showCard(i, mx, my), card.classList.contains('on') ? 0 : 60); }
   });
   cv.addEventListener('pointerup', e => {
+    if (drawing) { drawing = false; finishLasso(); return; }
     cv.classList.remove('grab');
     const wasDrag = moved; drag = null;
     if (wasDrag) return;
@@ -384,7 +441,87 @@ const Fig = (() => {
     if (kind === 'docs') Viewer.open(ids[i]);
     else api(`/api/brief?kind=images&ids=${ids[i]}`).then(b => b[0] && Viewer.open(b[0].doc_id, b[0].page));
   });
-  cv.addEventListener('pointerleave', () => { if (!drag) { hover = -1; hideCard(); draw(); } });
+  cv.addEventListener('pointerleave', () => { if (!drag && !drawing) { hover = -1; hideCard(); draw(); } });
+  cv.addEventListener('pointercancel', () => { if (drawing) clearLasso(); });
+
+  // ---- lasso -> label
+  function inPoly(x, y, P) {   // even-odd ray casting
+    let c = false;
+    for (let a = 0, b = P.length - 1; a < P.length; b = a++) {
+      const [xa, ya] = P[a], [xb, yb] = P[b];
+      if ((ya > y) !== (yb > y) && x < (xb - xa) * (y - ya) / (yb - ya) + xa) c = !c;
+    }
+    return c;
+  }
+  function select() {
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const [x, y] of poly) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const x = xs[i], y = ys[i];
+      if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && inPoly(x, y, poly)) out.push(i);
+    }
+    sel = out;
+    // overlap with lassoes already saved: points of this selection that someone already put in a region
+    const hit = new Set(); let shared = 0;
+    for (const i of sel) {
+      let any = false;
+      for (const L of saved) {
+        if (xs[i] < L.x0 || xs[i] > L.x1 || ys[i] < L.y0 || ys[i] > L.y1 || !inPoly(xs[i], ys[i], L.polygon)) continue;
+        any = true; hit.add(L.label);
+      }
+      if (any) shared++;
+    }
+    const lb = [...hit];
+    $('#lasso-n').innerHTML = `<b>${fmt(sel.length)}</b> ${kind === 'docs' ? 'documents' : 'figures (→ their documents)'} selected` +
+      (shared ? ` <span class="lasso-warn">· ${fmt(shared)} already in “${esc(lb.slice(0, 3).join('”, “'))}”${lb.length > 3 ? ` +${lb.length - 3}` : ''}</span>` : '');
+    $('#lasso').querySelector('[type=submit]').disabled = !sel.length;
+  }
+  function finishLasso() {
+    // simplify: at most ~400 vertices are kept (stored with the selection for the record)
+    if (poly.length > 400) { const k = Math.ceil(poly.length / 400); poly = poly.filter((_, j) => j % k === 0); }
+    if (poly.length < 3) { clearLasso(); return; }
+    select(); draw();
+    $('#lasso').hidden = false;
+    const inp = $('#lasso-label'); inp.focus(); inp.select();
+  }
+  function clearLasso() { poly = null; sel = null; drawing = false; $('#lasso').hidden = true; draw(); }
+  async function loadSaved() {
+    let r;
+    try { r = await api(`/api/labels/polygons?kind=${kind}`); } catch { return; }
+    saved = r.items.map(L => {
+      let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+      for (const [x, y] of L.polygon) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      const top = L.polygon.reduce((a, b) => b[1] < a[1] ? b : a);   // label sits on the topmost vertex
+      return {...L, x0, y0, x1, y1, bx: top[0], by: top[1]};
+    });
+    savedOther = r.other_layout;
+    if (poly && !drawing) select();
+    $('#lasso-saved').textContent = lassoOn ? `${fmt(saved.length)} saved lasso${saved.length === 1 ? '' : 'es'} shown` +
+      (savedOther ? ` · ${fmt(savedOther)} from an older map layout hidden` : '') : '';
+    draw();
+  }
+  function setLasso(on) {
+    lassoOn = on; $('#maplasso').setAttribute('aria-pressed', on); cv.classList.toggle('lassoing', on);
+    clearInterval(savedTimer);
+    if (on) { loadSaved(); savedTimer = setInterval(() => { if (!document.hidden) loadSaved(); }, 20000); }  // others keep drawing
+    else { $('#lasso-saved').textContent = ''; if (!sel) clearLasso(); draw(); }
+  }
+  $('#maplasso').onclick = () => setLasso(!lassoOn);
+  $('#lasso-cancel').onclick = clearLasso;
+  $('#lasso').addEventListener('submit', async e => {
+    e.preventDefault();
+    const label = $('#lasso-label').value.trim();
+    if (!label || !sel || !sel.length) return;
+    const btn = $('#lasso [type=submit]'); btn.disabled = true;
+    try {
+      const r = await api('/api/labels', {method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({label, kind, ids: sel.map(i => ids[i]), polygon: poly})});
+      toast(`“${r.label}” → ${fmt(r.n_docs)} documents (${fmt(r.n_new)} new)`);
+      clearLasso(); Labels.refresh();
+    } catch (err) { toast('Could not save: ' + err.message.slice(0, 120)); }
+    finally { btn.disabled = false; }
+  });
 
   function legend() {
     const tp = S.topics[kind === 'docs' ? 'text' : 'image'];
@@ -395,19 +532,23 @@ const Fig = (() => {
     key.innerHTML = top.map(([, i]) => `<span><i style="background:${tp.colors[i]}"></i>${esc(tp.labels[i].slice(0, 2).join(' · '))}</span>`).join('') + `<span class="faint">+${tp.k - top.length}</span>`;
   }
 
-  $$('#mapkind button').forEach(b => b.onclick = () => {
-    $$('#mapkind button').forEach(x => x.setAttribute('aria-selected', x === b)); kind = b.dataset.k;
-    known = new Set(); $('#map-what').textContent = kind === 'docs' ? 'documents' : 'figures (1 in 32 sampled)'; hl = null; reload();
-  });
+  function setKind(k) {
+    $$('#mapkind button').forEach(x => x.setAttribute('aria-selected', x.dataset.k === k)); kind = k;
+    known = new Set(); saved = []; if (lassoOn) setTimeout(loadSaved); $('#map-what').textContent = kind === 'docs' ? 'documents' : 'figures (1 in 32 sampled)'; hl = null; clearLasso();
+    return reload();
+  }
+  $$('#mapkind button').forEach(b => b.onclick = () => setKind(b.dataset.k));
   $$('#mapcolor button').forEach(b => b.onclick = () => {
     $$('#mapcolor button').forEach(x => x.setAttribute('aria-pressed', x === b)); colorBy = b.dataset.c; legend(); draw();
   });
   $('#mapreset').onclick = () => { view = {s: 1, x: 0, y: 0}; draw(); };
   new ResizeObserver(resize).observe(cv);
   return {
-    reload, legend, draw,
+    reload, legend, draw, setKind, setLasso, clearLasso, loadSaved,
     highlight(docIds) { hl = docIds && docIds.size ? docIds : null; if (kind === 'docs') draw(); },
     get kind() { return kind; },
+    get lassoPending() { return !!poly; },
+    get lassoOn() { return lassoOn; },
   };
 })();
 
@@ -565,6 +706,94 @@ const Browse = (() => {
   return {more, reset() { gen++; cursor = -1; done = false; loading = false; $('#browsebody').innerHTML = ''; more(); }};
 })();
 
+// ======================================================================= labels (§05)
+const Labels = (() => {
+  let shown = null;   // label currently lit up on the map
+  const ago = t => { const m = (Date.now() / 1000 - t) / 60; return m < 1 ? 'just now' : m < 60 ? `${m | 0} min ago` : m < 1440 ? `${m / 60 | 0} h ago` : new Date(t * 1000).toLocaleDateString(); };
+  async function refresh() {
+    let r;
+    if (Fig.lassoOn) Fig.loadSaved();   // undo / delete / new lasso: keep the outlines on the map in sync
+    try { r = await api('/api/labels'); } catch { return; }
+    $('#labelnames').innerHTML = r.labels.map(l => `<option value="${esc(l.label)}">`).join('');
+    $('#labellist').innerHTML = r.labels.length ? r.labels.map(l => `<li data-label="${esc(l.label)}"${l.label === shown ? ' class="cur"' : ''}>
+        <span class="nm" data-show>${esc(l.label)}</span><span class="n">${fmt(l.n_docs)} docs · ${l.n_selections} sel.</span>
+        <button data-dellabel title="Remove this label from every document">✕</button></li>`).join('')
+      : '<li><span class="faint mono">No labels yet. Draw on Fig. 1 with Lasso ✎ or Shift+drag.</span></li>';
+    $('#sellist').innerHTML = r.selections.map(x => `<li data-sel="${x.id}">
+        <span class="nm" data-show-label="${esc(x.label)}">${esc(x.label)}</span>
+        <span class="n">${fmt(x.n_docs)} docs · ${x.kind === 'docs' ? 'doc map' : x.kind === 'images' ? 'figure map' : x.kind} · ${ago(x.t)}</span>
+        <button data-undo title="Undo this selection">undo</button></li>`).join('');
+  }
+  async function show(label) {
+    if (shown === label) { shown = null; Fig.highlight(null); refresh(); return; }
+    const r = await api('/api/labels/docs?label=' + encodeURIComponent(label));
+    shown = label;
+    if (Fig.kind !== 'docs') await Fig.setKind('docs');
+    Fig.highlight(new Set(r.doc_ids));
+    location.hash = '#top';
+    toast(`“${label}”: ${fmt(r.doc_ids.length)} documents lit up`);
+    refresh();
+  }
+  $('#labels').addEventListener('click', async e => {
+    const li = e.target.closest('li');
+    if (!li) return;
+    if (e.target.closest('[data-show]')) return show(li.dataset.label);
+    if (e.target.closest('[data-show-label]')) return show(e.target.closest('[data-show-label]').dataset.showLabel);
+    if (e.target.closest('[data-dellabel]')) {
+      const l = li.dataset.label;
+      if (!confirm(`Remove the label “${l}” from every document?`)) return;
+      await api('/api/labels?label=' + encodeURIComponent(l), {method: 'DELETE'});
+      if (shown === l) { shown = null; Fig.highlight(null); }
+      toast(`Removed “${l}”`); return refresh();
+    }
+    if (e.target.closest('[data-undo]')) {
+      const r = await api('/api/labels?selection=' + li.dataset.sel, {method: 'DELETE'});
+      toast(`Undone (${fmt(r.removed)} document labels removed)`); return refresh();
+    }
+  });
+  return {refresh};
+})();
+
+// ======================================================================= sources (§06)
+const Sources = (() => {
+  const msg = (t, bad) => { const m = $('#srcmsg'); m.textContent = t; m.classList.toggle('bad', !!bad); };
+  async function refresh() {
+    let r;
+    try { r = await api('/api/sources'); } catch { return; }
+    $('#srclist').innerHTML = r.sources.map(s => `<li data-path="${esc(s.path)}">
+        <span class="nm" title="${esc(s.path)}">${s.added ? '<span class="red">+</span> ' : ''}${esc(s.name)}</span>
+        <span class="n">${esc(s.path)}</span>${s.added ? '<button data-unwatch title="Stop watching (indexed documents stay)">✕</button>' : ''}</li>`).join('')
+      || '<li><span class="faint mono">No sources configured.</span></li>';
+    if (!r.admin) msg('Adding folders is disabled until a password is set on the server (python -m pdfatlas.admin set-password).', true);
+  }
+  async function send(url, body) {
+    const r = await fetch(url, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || r.statusText);
+    return j;
+  }
+  $('#srcform').addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = $('#srcform [type=submit]'); btn.disabled = true; msg('checking…');
+    try {
+      const r = await send('/api/sources', {path: $('#src-path').value.trim(), name: $('#src-name').value.trim(), password: $('#src-pw').value});
+      msg(`Added “${r.name}”: ${fmt(r.n_pdfs)}${r.n_complete ? '' : '+'} PDFs found. The watcher will index them within a few minutes.`);
+      $('#src-path').value = ''; $('#src-name').value = ''; $('#src-pw').value = '';
+      refresh();
+    } catch (err) { msg(err.message, true); }
+    finally { btn.disabled = false; }
+  });
+  $('#srclist').addEventListener('click', async e => {
+    if (!e.target.closest('[data-unwatch]')) return;
+    const path = e.target.closest('li').dataset.path;
+    if (!$('#src-pw').value) { msg('Type the password above, then click ✕ again.', true); $('#src-pw').focus(); return; }
+    if (!confirm(`Stop watching ${path}? Documents already indexed stay searchable.`)) return;
+    try { await send('/api/sources/remove', {path, password: $('#src-pw').value}); $('#src-pw').value = ''; msg('Stopped watching ' + path); refresh(); }
+    catch (err) { msg(err.message, true); }
+  });
+  return {refresh};
+})();
+
 // ======================================================================= viewer
 const Viewer = (() => {
   const V = $('#viewer');
@@ -587,6 +816,7 @@ const Viewer = (() => {
       (doc.url ? `<a href="${esc(doc.url)}" target="_blank" rel="noopener"><span>↗</span> Source</a>` : '') +
       `<button id="v-likedoc"><span>→</span> Similar documents in search</button>` +
       `<span class="faint">${esc(topicName('text', doc.topic, 4))}</span>`;
+    renderLabels();
     $('#v-likedoc').onclick = () => { close(); S.like = ['like_doc', doc.doc_id, esc(doc.title.slice(0, 40))]; setMode('docs'); location.hash = '#search'; };
     const np = Math.min(doc.n_pages, 600), frag = document.createDocumentFragment();
     for (let i = 0; i < np; i++) {
@@ -609,6 +839,29 @@ const Viewer = (() => {
     api(`/api/search?mode=docs&like_doc=${doc.doc_id}&limit=10`).then(r => {
       $('#v-sim').innerHTML = r.items.map(it => `<li data-open="${it.doc.doc_id}">${esc(it.doc.title)}<span class="mono">${esc(it.doc.collection)} · ${it.doc.year ?? 's.d.'} · ${it.score}</span></li>`).join('');
     }).catch(() => {});
+  }
+
+  function renderLabels() {
+    const box = $('#v-labels');
+    box.innerHTML = (doc.labels || []).map(l => `<span class="chip">${esc(l)}<button data-unlabel="${esc(l)}" title="Remove from this document">✕</button></span>`).join('') +
+      '<input id="v-addlabel" list="labelnames" maxlength="80" placeholder="+ label" aria-label="Add a label to this document">';
+    $$('[data-unlabel]', box).forEach(b => b.onclick = async () => {
+      const l = b.dataset.unlabel;
+      await api(`/api/labels?label=${encodeURIComponent(l)}&doc_id=${doc.doc_id}`, {method: 'DELETE'}).catch(() => {});
+      doc.labels = doc.labels.filter(x => x !== l); renderLabels(); Labels.refresh();
+    });
+    $('#v-addlabel').onkeydown = async e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const l = e.target.value.trim();
+      if (!l) return;
+      try {
+        const r = await api('/api/labels', {method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({label: l, kind: 'docs', ids: [doc.doc_id], note: 'viewer'})});
+        if (!doc.labels.includes(r.label)) doc.labels.push(r.label);
+        renderLabels(); Labels.refresh(); $('#v-addlabel').focus();
+      } catch (err) { toast('Could not save: ' + err.message.slice(0, 120)); }
+    };
   }
 
   function go(p) {
@@ -653,6 +906,7 @@ const Viewer = (() => {
   document.addEventListener('keydown', e => {
     if (V.hidden) return;
     if (e.key === 'Escape') close();
+    if (document.activeElement.tagName === 'INPUT') return;
     if (e.key === 'ArrowRight' || e.key === 'j') go(page + 1);
     if (e.key === 'ArrowLeft' || e.key === 'k') go(page - 1);
   });
@@ -705,6 +959,8 @@ document.addEventListener('keydown', e => {
   if (e.key === '/' && !Viewer.open_ && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); location.hash = '#search'; $('#q').focus(); }
   if (e.key === 'Escape' && !$('#progress').hidden) openProgress(false);
   if (e.key === '0' && document.activeElement.tagName !== 'INPUT') $('#mapreset').click();
+  if ((e.key === 'l' || e.key === 'L') && !Viewer.open_ && document.activeElement.tagName !== 'INPUT') Fig.setLasso(!Fig.lassoOn);
+  if (e.key === 'Escape' && Viewer.open_ === false && Fig.lassoPending) Fig.clearLasso();
 });
 window.addEventListener('resize', () => { clearTimeout(window._rt); window._rt = setTimeout(() => S.stats && renderYears(), 150); });
 
@@ -718,6 +974,8 @@ loadStats().then(() => {
   setMode(u.get('mode') || 'semantic');
   Browse.reset();
   Fig.reload();
+  Labels.refresh();
+  Sources.refresh();
 });
 pollProgress();
 })();

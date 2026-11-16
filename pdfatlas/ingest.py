@@ -149,8 +149,9 @@ def ingest_images(con, bid, state):
     return len(df)
 
 
-def seal_segments(con, kind, n_total, final=False):
-    """Freeze full SEG-sized ranges (or, at the very end, the remainder) into Annoy segments."""
+def seal_segments(con, kind, n_total, final=False, min_final=1):
+    """Freeze full SEG-sized ranges (or, at the very end, a remainder of >= min_final rows) into Annoy
+    segments. Anything left unsealed is brute-forced by the server, which is exact and cheap."""
     from annoy import AnnoyIndex
     dim = C.TEXT_DIM if kind == "text" else image_dim()
     if not dim:
@@ -160,7 +161,7 @@ def seal_segments(con, kind, n_total, final=False):
         r = con.execute("SELECT coalesce(max(seg)+1,0), coalesce(max(end),0) FROM segments WHERE kind=?", (kind,)).fetchone()
         seg, start = r
         end = min(n_total, start + SEG[kind])
-        if end - start < (1 if final else SEG[kind]):
+        if end - start < (min_final if final else SEG[kind]):
             return
         t0 = time.time()
         X = np.memmap(raw, np.float16, "r", shape=(n_total, dim))
@@ -187,7 +188,11 @@ def seal_segments(con, kind, n_total, final=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--poll", type=int, default=15)
+    ap.add_argument("--incremental", action="store_true",
+                    help="adding a few new PDFs (pdfatlas.watch): leave a small remainder in the brute-forced "
+                         "tail instead of sealing a tiny Annoy segment per run, and skip the full FTS optimize")
     a = ap.parse_args()
+    min_final = {k: v // 8 for k, v in SEG.items()} if a.incremental else {k: 1 for k in SEG}
     C.IDX.mkdir(parents=True, exist_ok=True)
     con = connect()
     con.executescript(SCHEMA)
@@ -195,6 +200,7 @@ def main():
     state = dict(chunks=n_chunks, images=n_imgs, vrow=n_vrow)
     cat = pd.read_parquet(C.CATALOG).set_index("doc_id")
     print("resuming at", state, flush=True)
+    fresh = 0  # shards ingested by this process: nothing new -> no FTS optimize (hours on a big index)
     while True:
         done = {(k, b) for k, b in con.execute("SELECT kind, bid FROM ingested")}
         did = 0
@@ -212,15 +218,21 @@ def main():
             # images reference docs -> only after that shard's text is in
             if ("image", bid) not in done and ("text", bid) in done:
                 ingest_images(con, bid, state); did += 1
+        fresh += did
         if did:
             print(f"ingested {did} shards -> chunks={state['chunks']} images={state['images']} docs={state['vrow']}", flush=True)
         n_batches = int((C.SHARDS / "N_BATCHES").read_text()) if (C.SHARDS / "N_BATCHES").exists() else -1
         all_done = EXTRACT_DONE.exists() and con.execute(
             "SELECT count(*) FROM ingested WHERE kind='image'").fetchone()[0] >= n_batches
-        seal_segments(con, "text", state["chunks"], final=all_done)
-        seal_segments(con, "image", state["images"], final=all_done)
+        seal_segments(con, "text", state["chunks"], final=all_done, min_final=min_final["text"])
+        seal_segments(con, "image", state["images"], final=all_done, min_final=min_final["image"])
         if all_done:
-            con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
+            if not fresh:
+                pass
+            elif a.incremental:  # bounded work: merge a few FTS b-trees, not a rewrite of the whole index
+                con.execute("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('merge', 500)")
+            else:
+                con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
             con.commit()
             (C.WORK / "INGEST_DONE").write_text(time.ctime())
             print("all shards ingested; final segments sealed", flush=True)

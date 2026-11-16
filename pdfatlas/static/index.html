@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Martian+Mono:wdth,wght@75..112.5,300..600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=2">
+<link rel="stylesheet" href="/static/app.css?v=5">
 </head>
 <body>
 <script>document.documentElement.classList.add('js')</script>
@@ -25,6 +25,8 @@
     <li><a href="#topics">§02 Topics</a></li>
     <li><a href="#collections">§03 Collections</a></li>
     <li><a href="#browse">§04 Browse</a></li>
+    <li><a href="#labels">§05 Labels</a></li>
+    <li><a href="#sources">§06 Sources</a></li>
   </ul>
 </header>
 
@@ -55,13 +57,22 @@
           <button aria-pressed="true" data-c="topic">Topic</button>
           <button aria-pressed="false" data-c="collection">Collection</button>
         </div>
+        <button class="ghost" id="maplasso" aria-pressed="false" title="Draw a region and label every document in it (L, or Shift+drag)">Lasso ✎</button>
+        <span class="lasso-saved" id="lasso-saved"></span>
         <button class="ghost" id="mapreset" title="Reset zoom (0)">Reset ⟲</button>
       </div>
+      <form class="lasso mono" id="lasso" hidden autocomplete="off">
+        <div class="lasso-n" id="lasso-n"></div>
+        <label class="sel"><span>Label</span><input id="lasso-label" list="labelnames" maxlength="80" placeholder="e.g. invoices" required></label>
+        <button type="submit" class="ghost on">Save ↵</button>
+        <button type="button" class="ghost" id="lasso-cancel">Cancel</button>
+      </form>
+      <datalist id="labelnames"></datalist>
       <div class="card" id="card"><div class="card-in"></div></div>
       <div class="map-empty mono" id="mapempty">Waiting for the first topic fit…</div>
     </figure>
     <figcaption class="hero-cap mono">
-      <span>Fig. 1 — <b id="map-n">0</b> <span id="map-what">documents</span> placed by meaning. Hover to retrieve · click to open · scroll to zoom · drag to pan</span>
+      <span>Fig. 1 — <b id="map-n">0</b> <span id="map-what">documents</span> placed by meaning. Hover to retrieve · click to open · scroll to zoom · drag to pan · shift+drag to lasso</span>
       <span class="key" id="map-key"></span>
     </figcaption>
   </section>
@@ -137,6 +148,42 @@
     <div class="sentinel mono" id="bsentinel"></div>
   </section>
 
+  <!-- §05 LABELS ========================================================= -->
+  <section class="sec" id="labels">
+    <div class="sec-h"><span class="mono red">§05</span><h2>Labels</h2><span class="rule"></span></div>
+    <p class="lede">Your own categories. Draw a region on Fig. 1 with <b>Lasso ✎</b> (or Shift+drag) and name it: every document inside it gets the label. On the image map, a figure inside the region labels the document it belongs to. Labels belong to whole PDFs (stored by file path), and a document can carry any number of them. <a class="red mono" href="/api/labels.csv">Export CSV ↓</a></p>
+    <div class="cols2">
+      <div>
+        <div class="mono faint cap">Labels · click to light up on the map</div>
+        <ul class="lbls" id="labellist"></ul>
+      </div>
+      <div>
+        <div class="mono faint cap">Recent selections</div>
+        <ul class="lbls" id="sellist"></ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- §06 SOURCES ======================================================== -->
+  <section class="sec" id="sources">
+    <div class="sec-h"><span class="mono red">§06</span><h2>Sources</h2><span class="rule"></span></div>
+    <p class="lede">The folders being watched. PDFs that appear in them are indexed automatically. To add a completely new folder, give its absolute path <em>as seen from the server</em>. It becomes a new collection and is indexed within a few minutes (watch the progress bar). Needs the admin password, which is checked on the server.</p>
+    <div class="cols2">
+      <div>
+        <div class="mono faint cap">Watched folders · <span class="red">+</span> added here</div>
+        <ul class="lbls" id="srclist"></ul>
+      </div>
+      <form class="srcform mono" id="srcform" autocomplete="off">
+        <div class="mono faint cap">Add a folder</div>
+        <label class="sel wide"><span>Path</span><input id="src-path" placeholder="/data/pdfs/new_collection" required spellcheck="false"></label>
+        <label class="sel wide"><span>Name</span><input id="src-name" placeholder="defaults to the folder name" maxlength="60" spellcheck="false"></label>
+        <label class="sel wide"><span>Password</span><input id="src-pw" type="password" autocomplete="current-password" required></label>
+        <div><button type="submit" class="ghost on">Add folder +</button></div>
+        <div class="srcmsg" id="srcmsg" aria-live="polite"></div>
+      </form>
+    </div>
+  </section>
+
   <footer class="foot mono">
     <span>Source PDFs are read in place and never copied. Page images are rendered on demand and never stored.</span>
     <span id="models"></span>
@@ -152,6 +199,7 @@
         <div class="mono faint" id="v-sub"></div>
         <h3 id="v-title"></h3>
         <div class="mono v-links" id="v-links"></div>
+        <div class="mono v-labels" id="v-labels"></div>
       </div>
       <button class="ghost close mono" data-close aria-label="Close (Esc)">Esc ✕</button>
     </header>
@@ -188,6 +236,6 @@
 </div>
 
 <div class="toast mono" id="toast" role="status"></div>
-<script src="/static/app.js?v=2"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

@@ -48,13 +48,22 @@ IMG_MIN_PX = 120         # min intrinsic side (px) for an embedded image to coun
 IMG_MIN_FRAC = 0.02      # min area as a fraction of the page
 IMG_MAX_FRAC = 0.80      # larger = a scanned-page background, not a figure
 MAX_IMGS_PER_PAGE = 8
+DOC_TIMEOUT_S = 600      # a PDF still unread after this long is killed (metadata chunk is kept)
 
 
 # ------------------------------------------------------------------------------- sources
-def load_sources():
+# folders added later from the explorer (password-protected, see pdfatlas/admin.py); the watcher
+# re-reads this on every scan, so a new folder is picked up without restarting anything
+EXTRA_SOURCES = WORK / "extra_sources.json"
+
+
+def load_sources(extra=True):
     """-> list of dicts {name, path, glob, exclude, metadata}. See examples/sources.example.json."""
     spec = SOURCES_SPEC
+    ext = load_extra_sources() if extra else []
     if not spec:
+        if ext:
+            return ext
         raise SystemExit("Set PDFATLAS_SOURCES to a sources JSON file or to a directory of PDFs.")
     p = Path(spec).expanduser()
     if p.is_dir():   # every sub-directory is a collection; loose PDFs at the top go to "root"
@@ -62,8 +71,15 @@ def load_sources():
         out = [dict(name=d.name, path=str(d)) for d in subs]
         if any(f.suffix.lower() == ".pdf" for f in p.iterdir() if f.is_file()):
             out.append(dict(name="root", path=str(p), recursive=False))
-        return [_defaults(s) for s in out]
-    return [_defaults(s) for s in json.loads(p.read_text())["sources"]]
+        return [_defaults(s) for s in out] + ext
+    return [_defaults(s) for s in json.loads(p.read_text())["sources"]] + ext
+
+
+def load_extra_sources():
+    try:
+        return [_defaults(s) for s in json.loads(EXTRA_SOURCES.read_text())["sources"]]
+    except (FileNotFoundError, ValueError, KeyError):
+        return []
 
 
 def _defaults(s):
