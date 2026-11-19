@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import config as C
-from . import admin, labels
+from . import admin, labels, tasks
 
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="PDF Atlas")
@@ -304,6 +304,12 @@ def _map_bin(kind):
     if kind == "docs":
         rows = con.execute("SELECT doc_id, mx, my, topic, collection FROM docs WHERE mx IS NOT NULL").fetchall()
         extra = np.array([colls.get(r[4], 255) for r in rows], np.uint8)
+    elif kind == "tasks":
+        tc = tdb()
+        has = tc and tc.execute("SELECT 1 FROM sqlite_master WHERE name='task_map'").fetchone()
+        rows = tc.execute("SELECT m.id, m.mx, m.my, m.topic, d.collection FROM task_map m JOIN tasks t ON t.id = m.id "
+                          "JOIN a.docs d ON d.path = t.path").fetchall() if has else []
+        extra = np.array([colls.get(r[4], 255) for r in rows], np.uint8)
     else:
         rows = con.execute("SELECT i.id, i.mx, i.my, i.topic, d.collection FROM images i JOIN docs d USING(doc_id) "
                            "WHERE i.mx IS NOT NULL").fetchall()
@@ -316,7 +322,7 @@ def _map_bin(kind):
 
 @app.get("/api/map/{kind}.bin")
 def map_bin(kind: str):
-    if kind not in ("docs", "images"):
+    if kind not in ("docs", "images", "tasks"):
         raise HTTPException(404)
     ensure()
     c = _MAPS.get(kind)
@@ -499,6 +505,17 @@ def _search_keyword(q, offset, limit, collection, topic, yf, yt):
 def brief(ids: str = "", kind: str = "docs"):
     """Small hover cards for map points (ids comma separated, <=50)."""
     ii = [int(x) for x in ids.split(",") if x.strip().lstrip("-").isdigit()][:50]
+    if kind == "tasks":
+        tc = tdb()
+        if tc is None or not ii:
+            return []
+        rows = tc.execute("SELECT t.id, d.doc_id, t.page, d.title, d.collection, d.year, m.topic, t.task, "
+                          "substr(t.target, 1, 1500), t.figures, substr(t.input, 1, 1500) FROM tasks t JOIN a.docs d ON d.path = t.path "
+                          f"LEFT JOIN task_map m ON m.id = t.id WHERE t.id IN ({','.join('?' * len(ii))})", ii).fetchall()
+        return [dict(id=r[0], doc_id=r[1], page=max(r[2], 0), title=r[3], collection=r[4], year=r[5], topic=r[6],
+                     task=r[7], target=" ".join((tasks._content(r[8]) or tasks._content(r[10])).split())[:240],
+                     n_figures=len(json.loads(r[9])))
+                for r in rows]
     if kind == "images":
         if not ii:
             return []
@@ -567,6 +584,118 @@ def doc_text(doc_id: int, page: int):
     return dict(chunks=[dict(id=r[0], text=r[1]) for r in rows])
 
 
+# ----------------------------------------------------------------------------- tasks (DocMaestro, see tasks.py)
+def tdb():
+    """tasks.sqlite with the index attached as `a`, or None when no tasks were imported.
+    Reopened when `python -m pdfatlas.tasks --import` has replaced the file."""
+    if not tasks.DB.exists():
+        return None
+    mt = tasks.DB.stat().st_mtime
+    c = getattr(_local, "tcon", None)
+    if c is None or _local.tmt != mt:
+        c = tasks.connect(readonly=True)
+        c.execute("ATTACH DATABASE ? AS a", (f"file:{C.DB}?mode=ro",))
+        _local.tcon, _local.tmt = c, mt
+    return c
+
+
+@app.get("/api/tasks/types")
+def task_types():
+    c = tdb()
+    if c is None:
+        return dict(types=[], total=0)
+    rows = c.execute("SELECT task, count(*) n FROM tasks GROUP BY task ORDER BY n DESC").fetchall()
+    return dict(types=[dict(task=r[0], n=r[1]) for r in rows], total=sum(r[1] for r in rows))
+
+
+@app.get("/api/tasks")
+def search_tasks(q: str = "", task: str = "", offset: int = 0, limit: int = Query(20, le=60), collection: str = "",
+                 topic: int | None = None, year_from: int | None = None, year_to: int | None = None):
+    """Tasks in import order (document by document); with q, FTS5 over their input + target (BM25).
+    Each item carries the document and page it comes from, so the explorer can open its context."""
+    t0 = time.time()
+    c = tdb()
+    if c is None:
+        return dict(items=[], offset=0, next=None, total=0, ms=0)
+    w, p = where_filters(collection, topic, year_from, year_to)
+    if task:
+        w.append("t.task=?"); p.append(task)
+    where = " AND ".join(w) or "1"
+    cols = "t.id, t.task, t.page, t.pages, t.figures, t.region, d.doc_id"
+    if q:
+        sql = f"""
+          WITH m AS (SELECT rowid id, rank, snippet(tasks_fts, 0, char(2), char(3), ' … ', 30) si,
+                            snippet(tasks_fts, 1, char(2), char(3), ' … ', 30) st
+                     FROM tasks_fts WHERE tasks_fts MATCH ? ORDER BY rank LIMIT 5000)
+          SELECT {cols}, m.si, m.st FROM m JOIN tasks t ON t.id = m.id JOIN a.docs d ON d.path = t.path
+          WHERE {where} ORDER BY m.rank LIMIT ? OFFSET ?"""
+        args = [_fts_query(q), *p, limit + 1, offset]
+    else:
+        sql = f"""SELECT {cols}, substr(t.input, 1, 400), substr(t.target, 1, 400)
+                  FROM tasks t JOIN a.docs d ON d.path = t.path WHERE {where} ORDER BY t.id LIMIT ? OFFSET ?"""
+        args = [*p, limit + 1, offset]
+    try:
+        rows = c.execute(sql, args).fetchall()
+    except sqlite3.OperationalError as e:
+        raise HTTPException(400, f"bad query: {e}")
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    docs = docs_by_id({r[6] for r in rows})
+    items = [dict(task=dict(id=r[0], task=r[1], page=r[2], pages=json.loads(r[3]), n_figures=len(json.loads(r[4])),
+                            region=json.loads(r[5]) if r[5] else None, input=r[7] or "", target=r[8] or ""),
+                  doc=docs[r[6]]) for r in rows if r[6] in docs]
+    return dict(items=items, offset=offset, next=offset + limit if has_more else None, total=None,
+                ms=int((time.time() - t0) * 1000))
+
+
+@app.get("/api/task/{task_id}")
+def task_one(task_id: int):
+    """One task in full (input/target as imported, up to tasks.MAX_TEXT characters), for the viewer."""
+    c = tdb()
+    r = c and c.execute("SELECT t.id, t.task, t.page, t.pages, t.figures, t.region, t.input, t.target, d.doc_id, t.key "
+                        "FROM tasks t JOIN a.docs d ON d.path = t.path WHERE t.id=?", (task_id,)).fetchone()
+    if not r:
+        raise HTTPException(404)
+    return dict(id=r[0], task=r[1], page=r[2], pages=json.loads(r[3]), n_figures=len(json.loads(r[4])),
+                region=json.loads(r[5]) if r[5] else None, input=r[6] or "", target=r[7] or "", doc_id=r[8], key=r[9])
+
+
+@app.get("/api/doc/{doc_id}/tasks")
+def doc_tasks(doc_id: int, limit: int = Query(3000, le=10000)):
+    """The tasks generated from one document: counts per type and a short preview of each."""
+    c = tdb()
+    if c is None:
+        return dict(types=[], items=[], total=0)
+    path = c.execute("SELECT path FROM a.docs WHERE doc_id=?", (doc_id,)).fetchone()
+    if not path:
+        raise HTTPException(404)
+    types = c.execute("SELECT task, count(*) FROM tasks WHERE path=? GROUP BY task ORDER BY count(*) DESC",
+                      (path[0],)).fetchall()
+    rows = c.execute("SELECT id, task, page, figures, substr(target, 1, 600) FROM tasks WHERE path=? "
+                     "ORDER BY task, page, id LIMIT ?", (path[0], limit)).fetchall()
+    items = [dict(id=r[0], task=r[1], page=r[2], n_figures=len(json.loads(r[3])),
+                  preview=" ".join(tasks._content(r[4]).split())[:140]) for r in rows]
+    return dict(types=[dict(task=t, n=n) for t, n in types], items=items, total=sum(n for _, n in types))
+
+
+@app.get("/api/task/{task_id}/crop/{k}.jpg")
+def task_crop(task_id: int, k: int):
+    """k-th figure crop a task shows the model, from DocMaestro's extraction tree (tasks --crops)."""
+    c = tdb()
+    r = c and c.execute("SELECT dm_doc, figures FROM tasks WHERE id=?", (task_id,)).fetchone()
+    root = c and c.execute("SELECT v FROM meta WHERE k='crops'").fetchone()
+    if not r or not root or not root[0]:
+        raise HTTPException(404)
+    figs = json.loads(r[1])
+    if not 0 <= k < len(figs):
+        raise HTTPException(404)
+    base = (Path(root[0]) / r[0]).resolve()
+    f = (base / figs[k]).resolve()
+    if base not in f.parents or not f.is_file():   # never outside the document's own folder
+        raise HTTPException(404)
+    return FileResponse(f, headers=IMG_HEADERS)
+
+
 # ----------------------------------------------------------------------------- labels (lasso on the map)
 class LabelIn(BaseModel):
     label: str
@@ -576,11 +705,18 @@ class LabelIn(BaseModel):
     note: str = ""
 
 
+def _topic_kind(kind):
+    """map kind (docs | images | tasks) -> its entry in map/topics.json"""
+    return {"docs": "text", "images": "image"}.get(kind, kind)
+
+
 def _docs_of(kind, ids):
     """map point ids -> {doc_id: path} of the documents that own them."""
-    con, out = db(), {}
+    con, out = (tdb(), {}) if kind == "tasks" else (db(), {})
     ids = sorted({int(i) for i in ids})
     q = ("SELECT doc_id, path FROM docs WHERE doc_id IN ({})" if kind == "docs" else
+         "SELECT DISTINCT d.doc_id, d.path FROM tasks t JOIN a.docs d ON d.path = t.path WHERE t.id IN ({})"
+         if kind == "tasks" else
          "SELECT DISTINCT d.doc_id, d.path FROM images i JOIN docs d USING(doc_id) WHERE i.id IN ({})")
     for k in range(0, len(ids), 900):
         part = ids[k:k + 900]
@@ -592,8 +728,8 @@ def _docs_of(kind, ids):
 def label_add(body: LabelIn):
     """Attach a label to every document owning one of the given map points (a lasso, or one doc)."""
     ensure()
-    if body.kind not in ("docs", "images"):
-        raise HTTPException(400, "kind must be docs or images")
+    if body.kind not in ("docs", "images", "tasks"):
+        raise HTTPException(400, "kind must be docs, images or tasks")
     try:
         labels.clean_label(body.label)
     except ValueError as e:
@@ -601,7 +737,7 @@ def label_add(body: LabelIn):
     docs = _docs_of(body.kind, body.ids)
     if not docs:
         raise HTTPException(400, "no indexed documents in the selection")
-    ver = topics().get("text" if body.kind == "docs" else "image", {}).get("version")
+    ver = topics().get(_topic_kind(body.kind), {}).get("version")
     poly = [[round(x, 5), round(y, 5)] for x, y in (body.polygon or [])][:2000] or None
     return labels.add(body.label, body.kind, docs, len(set(body.ids)), poly, ver, body.note[:200])
 
@@ -615,7 +751,7 @@ def label_summary():
 def label_polygons(kind: str = "docs"):
     """Saved lassoes for one map. Coordinates are only meaningful on the layout they were drawn on, so
     lassoes from an earlier topic/map fit are counted but not returned."""
-    ver = topics().get("text" if kind == "docs" else "image", {}).get("version")
+    ver = topics().get(_topic_kind(kind), {}).get("version")
     allp = labels.polygons(kind)
     cur = [p for p in allp if p["map_version"] == ver]
     return dict(items=cur, other_layout=len(allp) - len(cur), version=ver)

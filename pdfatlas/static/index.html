@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Martian+Mono:wdth,wght@75..112.5,300..600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=5">
+<link rel="stylesheet" href="/static/app.css?v=6">
 </head>
 <body>
 <script>document.documentElement.classList.add('js')</script>
@@ -52,6 +52,7 @@
         <div class="seg" role="tablist" id="mapkind">
           <button role="tab" aria-selected="true" data-k="docs">Documents</button>
           <button role="tab" aria-selected="false" data-k="images">Images</button>
+          <button role="tab" aria-selected="false" data-k="tasks" hidden>Tasks</button>
         </div>
         <div class="seg" id="mapcolor">
           <button aria-pressed="true" data-c="topic">Topic</button>
@@ -92,8 +93,10 @@
         <button role="tab" data-m="docs" aria-selected="false">Documents</button>
         <button role="tab" data-m="image" aria-selected="false">Images</button>
         <button role="tab" data-m="keyword" aria-selected="false">Keyword</button>
+        <button role="tab" data-m="tasks" aria-selected="false" hidden>Tasks</button>
       </div>
       <div class="filters mono">
+        <label class="sel" id="f-taskwrap" hidden><span>Task</span><select id="f-task"><option value="">All</option></select></label>
         <label class="sel"><span>Collection</span><select id="f-coll"><option value="">All</option></select></label>
         <label class="sel"><span>Topic</span><select id="f-topic"><option value="">All</option></select></label>
         <label class="sel yr"><span>Years</span><input id="f-y0" inputmode="numeric" placeholder="1800" maxlength="4"><i>–</i><input id="f-y1" inputmode="numeric" placeholder="2026" maxlength="4"></label>
@@ -217,6 +220,9 @@
         <div class="v-text" id="v-text" hidden></div>
       </div>
       <aside class="v-side">
+        <section class="v-task" id="v-task" hidden></section>
+        <div class="mono faint cap" id="v-taskcap" hidden></div>
+        <div class="v-tasks" id="v-tasks"></div>
         <div class="mono faint cap" id="v-imgcap">Images in this document</div>
         <div class="v-imgs" id="v-imgs"></div>
         <div class="mono faint cap">Similar documents</div>
@@ -236,6 +242,6 @@
 </div>
 
 <div class="toast mono" id="toast" role="status"></div>
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=7"></script>
 </body>
 </html>

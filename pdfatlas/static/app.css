@@ -151,6 +151,10 @@ mark{background:var(--red-soft);color:var(--fg);box-shadow:inset 0 -1px 0 var(--
 .hit{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:baseline;color:var(--dim);font-size:15px;line-height:1.5}
 .hit .pg{color:var(--red);cursor:pointer;white-space:nowrap}
 .hit .tx{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.sel[hidden]{display:none}
+.res.task .hit{grid-template-columns:52px minmax(0,1fr)}
+.res.task .hit .tx{font-family:var(--mono);font-size:12px;word-break:break-word}
+.res.task .thumb img{object-fit:contain;background:#fff}
 .hit .more{color:var(--faint);white-space:nowrap;cursor:pointer;opacity:.0;transition:opacity .15s ease}
 .hit:hover .more,.hit:focus-within .more{opacity:1}
 @media (hover:none){.hit .more{opacity:1}}
@@ -262,6 +266,26 @@ mark{background:var(--red-soft);color:var(--fg);box-shadow:inset 0 -1px 0 var(--
 .v-imgs button{aspect-ratio:1;background:var(--bg3);border:1px solid var(--line);overflow:hidden}
 .v-imgs img{width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .2s ease}
 .v-imgs img.ok{opacity:1}
+.v-boxes i.treg{border:2px dashed var(--red);background:transparent;pointer-events:none}
+.v-task{border:1px solid var(--red);padding:12px;margin-bottom:22px}
+.v-task header{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:10px}
+.v-task header b{font-size:16px}
+.v-task header button{color:var(--dim)}
+.v-task .lab{color:var(--red);margin:10px 0 4px}
+.v-task pre{white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.45;color:var(--dim);
+  max-height:260px;overflow:auto;background:var(--bg3);padding:8px;border:1px solid var(--line)}
+.v-task .crops{display:flex;flex-wrap:wrap;gap:4px}
+.v-task .crops img{max-height:110px;max-width:100%;background:#fff;opacity:0;transition:opacity .2s ease}
+.v-task .crops img.ok{opacity:1}
+.v-tasks{margin-bottom:22px}
+.v-tasks details{border-bottom:1px solid var(--line)}
+.v-tasks summary{padding:8px 0;cursor:pointer;display:flex;justify-content:space-between;font-size:14px}
+.v-tasks summary .mono{color:var(--faint)}
+.v-tasks button{display:block;width:100%;text-align:left;padding:5px 0 5px 10px;font-size:13px;line-height:1.3;color:var(--dim);
+  border-left:1px solid var(--line)}
+.v-tasks button .mono{color:var(--faint);margin-right:6px}
+.v-tasks button.cur{color:var(--fg);border-color:var(--red)}
+@media (hover:hover){.v-tasks button:hover{color:var(--red)}}
 .v-sim li{padding:9px 0;border-bottom:1px solid var(--line);cursor:pointer;font-size:14px;line-height:1.3}
 .v-sim li .mono{color:var(--faint);display:block;margin-top:3px}
 @media (hover:hover){.v-sim li:hover{color:var(--red)}}
