@@ -39,6 +39,10 @@ Nothing in it is domain-specific: point it at folders of PDFs.
   page text with "similar passages", similar documents, link to the PDF and its source URL.
 * **Browse**: the catalogue with collection / topic / year filters.
 * **Live progress**: a bar in the explorer, a `/progress` page and a terminal dashboard.
+* **Tasks**: the self-supervised training tasks that [DocMaestro](https://github.com/VLR-CVC/DocMaestro)
+  generates from each document (OCR, layout, markdown, caption prediction, figure selection, reading order,
+  page sorting, …), as a fourth search mode: browse them by type, search their input and target, and click
+  one to open the document at the page it comes from. Optional; see [Tasks](#tasks).
 * **Labels (lasso)**: draw a free-hand region on the map (**Lasso ✎**, `L`, or Shift+drag), name it,
   and every document inside it gets that label. On the figure map, a figure inside the region labels
   its document. Labels apply to whole PDFs (stored by file path), a document can have any number of
@@ -90,6 +94,21 @@ refitted. Deleted or modified PDFs are not detected.
 always safe. `./run.sh restart-server` / `restart-extract` restart a single stage (e.g. after
 changing `PORT` or `EXTRACT_WORKERS`).
 
+### Tasks
+
+Import the per-document JSON written by DocMaestro's `scripts/run_doctasks.py --json-out DIR`:
+
+```bash
+python -m pdfatlas.tasks --import /path/to/doctasks-json --crops /path/to/docmaestro/processed
+python -m pdfatlas.tasks --map --gpu 0      # tasks map: 1 task in 32 embedded with the text model, k-means topics, UMAP
+```
+
+The **Tasks** mode appears in the explorer once tasks exist. `--crops` (DocMaestro's extraction tree, holding
+`<doc_id>/images/…`) is only needed to show figure crops. A DocMaestro `doc_id` is matched to a PDF as
+`<collection>/<path inside the collection without .pdf>`, i.e. when its extraction tree mirrors the sources, or else
+by unique file name. Re-running replaces the previous import; tasks live in `$PDFATLAS_WORK/tasks.sqlite`, keyed by
+PDF path like the labels.
+
 ### Sources file
 
 ```json
@@ -122,6 +141,7 @@ abstract), so scanned PDFs without a text layer are still findable by title. See
 | ingest | `pdfatlas/ingest.py` | appends to SQLite (WAL, so readers never block), FTS5 and append-only fp16 vector files. Every 400k text / 200k image vectors are sealed into an immutable Annoy segment. Crash-safe: on restart the vector files are trimmed back to what the DB committed. |
 | topics | `pdfatlas/topics.py` | refits at milestones (1.5k, 8k, 30k, 80k docs, then once at the end). Between refits, new documents get the nearest centroid and `umap.transform` coordinates, so the map grows instead of reshuffling. |
 | watch | `pdfatlas/watch.py` | polls the sources for new PDFs, appends them to the catalogue + batch manifest (`shards/BATCHES.parquet`), runs the stages above on the new batches only |
+| tasks | `pdfatlas/tasks.py` | DocMaestro tasks imported into `tasks.sqlite` (FTS5 over input + target), keyed by document path; run on demand, not part of the pipeline |
 | labels | `pdfatlas/labels.py` | user labels per document path in `labels.sqlite` (separate from the index, so the pipeline never contends with it and labels survive a rebuild) |
 | progress | `pdfatlas/progress.py` | `progress.json` (served at `/api/progress`) + terminal dashboard, including our own CPU/GPU usage |
 | server | `pdfatlas/server.py` | FastAPI. Vector search = Annoy over sealed segments + brute force over the unsealed tail, merged. Pages and figure crops are rendered on demand by MuPDF in worker processes (in-memory LRU, nothing written). |
@@ -138,6 +158,7 @@ abstract), so scanned PDFs without a text layer are still findable by title. See
 | `GET /api/render/{doc}/{page}.jpg?w=`, `/api/image/{id}.jpg?w=`, `/api/pdf/{doc}` | rendered page, figure crop, original PDF |
 | `GET /api/map/{docs\|images}.bin` | `u32 n · i32 ids[n] · u16 xy[n,2] · u8 topic+1[n] · u8 collection[n]` |
 | `GET /api/stats`, `/api/progress`, `/api/topic/{docs\|images}/{k}` | |
+| `GET /api/tasks?q=&task=&offset=&limit=&collection=&topic=&year_from=&year_to=`, `/api/tasks/types`, `/api/task/{id}/crop/{k}.jpg` | DocMaestro tasks: browse or FTS5 search, counts per type, figure crops |
 | `POST /api/labels` `{label, kind: docs\|images, ids: [map point ids], polygon?}` | label the documents owning those points |
 | `GET /api/labels`, `/api/labels/docs?label=`, `/api/labels.csv` | summary + recent selections, current doc_ids of a label, export |
 | `DELETE /api/labels?selection=ID` / `?label=X&doc_id=N` / `?label=X` | undo a lasso / remove from one document / remove everywhere |

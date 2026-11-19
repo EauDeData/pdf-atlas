@@ -47,6 +47,7 @@ function topicName(kind, t, n = 3) {
   const tp = S.topics[kind];
   return tp && t >= 0 && tp.labels[t] ? tp.labels[t].slice(0, n).join(' · ') : '—';
 }
+const TOPIC_KIND = k => ({docs: 'text', images: 'image'})[k] || k;   // map kind -> its key in topics.json
 const COLL_COLORS = c => `hsl(${(S.colls.indexOf(c) * 360 / Math.max(1, S.colls.length) + 200) % 360} 55% 60%)`;
 
 // ======================================================================= progress (live)
@@ -277,7 +278,7 @@ const Fig = (() => {
 
   function color(i) {
     const t = tops[i] - 1;
-    return colorBy === 'topic' ? topicColor(kind === 'docs' ? 'text' : 'image', t) : (COLL_COLORS(S.colls[colls[i]]) || '#888');
+    return colorBy === 'topic' ? topicColor(TOPIC_KIND(kind), t) : (COLL_COLORS(S.colls[colls[i]]) || '#888');
   }
 
   function draw() {
@@ -381,10 +382,11 @@ const Fig = (() => {
       b = r[0]; if (!b) return; cache.set(kind + id, b);
     }
     if (cardFor !== id) return;
-    const ph = kind === 'docs' ? pageSrc(b.doc_id, 0, 288) : imgSrc(b.id, 288);
+    const ph = kind === 'docs' ? pageSrc(b.doc_id, 0, 288) : kind === 'tasks'
+      ? (b.n_figures ? `/api/task/${b.id}/crop/0.jpg` : pageSrc(b.doc_id, b.page, 288)) : imgSrc(b.id, 288);
     const t = tops[i] - 1;
-    card.firstElementChild.innerHTML = `<div class="ph"><img alt=""></div><div class="tx"><span class="mono faint">${esc(b.collection)} · ${b.year ?? 's.d.'}${kind === 'docs' ? ` · ${fmt(b.n_pages)} pp` : ` · p.${b.page + 1}`}</span>
-      <b>${esc(b.title)}</b><span class="mono" style="color:${color(i)}">${esc(topicName(kind === 'docs' ? 'text' : 'image', t))}</span></div>`;
+    card.firstElementChild.innerHTML = `<div class="ph"><img alt=""></div><div class="tx"><span class="mono faint">${kind === 'tasks' ? esc(taskName(b.task)) + ' · ' : ''}${esc(b.collection)} · ${b.year ?? 's.d.'}${kind === 'docs' ? ` · ${fmt(b.n_pages)} pp` : ` · p.${b.page + 1}`}</span>
+      <b>${esc(b.title)}</b>${kind === 'tasks' && b.target ? `<span class="faint">${esc(b.target.slice(0, 160))}</span>` : ''}<span class="mono" style="color:${color(i)}">${esc(topicName(TOPIC_KIND(kind), t))}</span></div>`;
     lazyImg($('img', card), ph);
     card.classList.add('on');
   }
@@ -439,7 +441,7 @@ const Fig = (() => {
     if (i < 0) return;
     if (e.pointerType !== 'mouse' && hover !== i) { hover = i; draw(); showCard(i, e.clientX - r.left, e.clientY - r.top); return; } // tap = preview, 2nd tap = open
     if (kind === 'docs') Viewer.open(ids[i]);
-    else api(`/api/brief?kind=images&ids=${ids[i]}`).then(b => b[0] && Viewer.open(b[0].doc_id, b[0].page));
+    else api(`/api/brief?kind=${kind}&ids=${ids[i]}`).then(b => b[0] && Viewer.open(b[0].doc_id, b[0].page, [], kind === 'tasks' ? b[0].id : null));
   });
   cv.addEventListener('pointerleave', () => { if (!drag && !drawing) { hover = -1; hideCard(); draw(); } });
   cv.addEventListener('pointercancel', () => { if (drawing) clearLasso(); });
@@ -473,7 +475,7 @@ const Fig = (() => {
       if (any) shared++;
     }
     const lb = [...hit];
-    $('#lasso-n').innerHTML = `<b>${fmt(sel.length)}</b> ${kind === 'docs' ? 'documents' : 'figures (→ their documents)'} selected` +
+    $('#lasso-n').innerHTML = `<b>${fmt(sel.length)}</b> ${kind === 'docs' ? 'documents' : kind === 'tasks' ? 'tasks (→ their documents)' : 'figures (→ their documents)'} selected` +
       (shared ? ` <span class="lasso-warn">· ${fmt(shared)} already in “${esc(lb.slice(0, 3).join('”, “'))}”${lb.length > 3 ? ` +${lb.length - 3}` : ''}</span>` : '');
     $('#lasso').querySelector('[type=submit]').disabled = !sel.length;
   }
@@ -524,7 +526,7 @@ const Fig = (() => {
   });
 
   function legend() {
-    const tp = S.topics[kind === 'docs' ? 'text' : 'image'];
+    const tp = S.topics[TOPIC_KIND(kind)];
     const key = $('#map-key');
     if (colorBy === 'collection') { key.innerHTML = S.colls.map(c => `<span><i style="background:${COLL_COLORS(c)}"></i>${esc(c)}</span>`).join(''); return; }
     if (!tp) { key.innerHTML = '<span class="faint">topics not fitted yet</span>'; return; }
@@ -534,7 +536,7 @@ const Fig = (() => {
 
   function setKind(k) {
     $$('#mapkind button').forEach(x => x.setAttribute('aria-selected', x.dataset.k === k)); kind = k;
-    known = new Set(); saved = []; if (lassoOn) setTimeout(loadSaved); $('#map-what').textContent = kind === 'docs' ? 'documents' : 'figures (1 in 32 sampled)'; hl = null; clearLasso();
+    known = new Set(); saved = []; if (lassoOn) setTimeout(loadSaved); $('#map-what').textContent = kind === 'docs' ? 'documents' : kind === 'tasks' ? 'tasks (1 in 32 sampled)' : 'figures (1 in 32 sampled)'; hl = null; clearLasso();
     return reload();
   }
   $$('#mapkind button').forEach(b => b.onclick = () => setKind(b.dataset.k));
@@ -558,12 +560,15 @@ const HINT = {
   docs: 'Whole documents ranked by their mean passage vector. Good for “papers about…”.',
   image: 'Figures inside PDFs, ranked by SigLIP-2 text→image similarity. Try “a map”, “bar chart” or “group photo”.',
   keyword: 'Exact words (SQLite FTS5, BM25). Supports "quoted phrases", OR, NOT, prefix*.',
+  tasks: 'Training tasks generated by DocMaestro from each document (OCR, layout, captions, ordering…). Leave the box empty to browse; words search their input and target. Click one to open it in its document.',
 };
+const taskName = t => String(t || '').replace(/_/g, ' ');
 
 function params(offset) {
   const p = new URLSearchParams({mode: S.mode, offset, limit: S.mode === 'image' ? 36 : PAGE});
   if (S.q) p.set('q', S.q);
-  if (S.like) p.set(S.like[0], S.like[1]);
+  if (S.like && S.mode !== 'tasks') p.set(S.like[0], S.like[1]);
+  if (S.mode === 'tasks' && S.task) p.set('task', S.task);
   const f = S.filt;
   if (f.collection) p.set('collection', f.collection);
   if (f.topic !== '') p.set('topic', f.topic);
@@ -576,6 +581,7 @@ function syncURL() {
   const p = new URLSearchParams();
   if (S.q) p.set('q', S.q);
   if (S.mode !== 'semantic') p.set('mode', S.mode);
+  if (S.mode === 'tasks' && S.task) p.set('task', S.task);
   for (const [k, v] of Object.entries(S.filt)) if (v !== '') p.set(k, v);
   history.replaceState(null, '', (p.toString() ? '?' + p : location.pathname) + location.hash);
 }
@@ -586,38 +592,54 @@ function newSearch() {
   $('#status').innerHTML = '';
   $('#modehint').textContent = HINT[S.mode];
   syncURL();
-  if (!S.q && !S.like) { $('#sentinel').textContent = ''; Fig.highlight(null); return; }
+  if (!S.q && !S.like && S.mode !== 'tasks') { $('#sentinel').textContent = ''; Fig.highlight(null); return; }
   more();
 }
 
 async function more() {
-  if (S.loading || S.next === null || (!S.q && !S.like)) return;
+  const tasks = S.mode === 'tasks';   // tasks can be browsed without a query
+  if (S.loading || S.next === null || (!S.q && !S.like && !tasks)) return;
   S.loading = true;
   const gen = S.gen;
   $('#sentinel').innerHTML = '<span class="spin"></span>searching';
   try {
-    const r = await api('/api/search?' + params(S.next));
+    const r = await api((tasks ? '/api/tasks?' : '/api/search?') + params(S.next));
     if (gen !== S.gen) return;
     S.next = r.next;
-    if (S.mode === 'image') renderTiles(r.items); else renderResults(r.items);
+    if (tasks) renderTasks(r.items); else if (S.mode === 'image') renderTiles(r.items); else renderResults(r.items);
     S.shown += r.items.length;
-    const what = S.like ? `similar to ${S.like[2]}` : `“${esc(S.q)}”`;
-    $('#status').innerHTML = `<span><b>${fmt(S.shown)}</b>${r.total ? ` of ${fmt(r.total)}` : ''} ${S.mode === 'image' ? 'figures' : 'documents'} for ${what}</span>` +
+    const what = tasks ? (S.q ? `“${esc(S.q)}”` : S.task ? esc(taskName(S.task)) : 'all types')
+      : S.like ? `similar to ${S.like[2]}` : `“${esc(S.q)}”`;
+    $('#status').innerHTML = `<span><b>${fmt(S.shown)}</b>${r.total ? ` of ${fmt(r.total)}` : ''} ${tasks ? 'tasks' : S.mode === 'image' ? 'figures' : 'documents'} for ${what}</span>` +
       (r.searched ? `<span>over ${fmt(r.searched)} ${S.mode === 'image' ? 'figures' : S.mode === 'docs' ? 'documents' : 'passages'} indexed so far</span>` : '') +
       `<span>${r.ms} ms</span>` + (S.like ? '<button class="ghost" id="unlike">✕ clear</button>' : '');
     if ($('#unlike')) $('#unlike').onclick = () => { S.like = null; newSearch(); };
     $('#sentinel').textContent = S.next === null ? (S.shown ? '— end —' : 'Nothing found (yet: the index is still growing).') : '';
+    if (S.next !== null) {   // also loads on demand when auto-loading is off (see canAuto)
+      $('#sentinel').innerHTML = '<button class="ghost mono" id="loadmore">Show more ↓</button>';
+      $('#loadmore').onclick = () => more();
+    }
     if (S.mode !== 'image') Fig.highlight(new Set($$('#results [data-doc]').map(e => +e.dataset.doc)));
   } catch (e) {
     if (gen === S.gen) $('#sentinel').textContent = 'Error: ' + e.message.slice(0, 200);
   } finally {
     if (gen === S.gen) S.loading = false;
     // the sentinel may still be visible after a short page -> keep filling
-    if (gen === S.gen && S.next !== null && isVisible($('#sentinel'))) more();
+    if (gen === S.gen && S.next !== null && canAuto() && isVisible($('#sentinel'))) more();
   }
 }
+// Infinite scroll only up to AUTO_MAX results. Beyond that, a "Show more" button: otherwise the list keeps growing
+// whenever its end is near the screen, and the sections under it (topics, collections…) can never be reached.
+// It also pauses while the next section is on screen, i.e. after a jump with the §02, §03… links.
+const AUTO_MAX = 60;
+// A jump with the §0x links scrolls past the end of the list: loading more then would push the target section away
+// mid-scroll, so loading waits until that scroll is over (and, after it, the target section is on screen).
+let navUntil = 0;
+document.addEventListener('click', e => { const a = e.target.closest('a[href^="#"]'); if (a && a.getAttribute('href') !== '#search') navUntil = Date.now() + 2000; }, true);
+addEventListener('hashchange', () => { if (location.hash !== '#search') navUntil = Date.now() + 2000; });
+const canAuto = () => S.shown < AUTO_MAX && Date.now() > navUntil && $('#topics').getBoundingClientRect().top > innerHeight;
 const isVisible = el => { const r = el.getBoundingClientRect(); return r.top < innerHeight + 600 && r.bottom > 0; };
-new IntersectionObserver(es => es.some(e => e.isIntersecting) && more(), {rootMargin: '600px'}).observe($('#sentinel'));
+new IntersectionObserver(es => es.some(e => e.isIntersecting) && canAuto() && more(), {rootMargin: '600px'}).observe($('#sentinel'));
 
 function highlight(text, q) {
   let t = esc(text).replace(/\u0002/g, '<mark>').replace(/\u0003/g, '</mark>');
@@ -662,6 +684,38 @@ function renderTiles(items) {
   g.appendChild(frag);
 }
 
+// one row per task: where it comes from (page or crop), what the model sees, what it must answer.
+// Clicking the row opens the document at that page, like a figure tile does.
+function renderTasks(items) {
+  const ol = $('#results'), frag = document.createDocumentFragment();
+  items.forEach((it, k) => {
+    const t = it.task, d = it.doc, li = document.createElement('li');
+    const page = t.page >= 0 ? t.page : (t.pages[0] ?? 0);
+    const where = t.page >= 0 ? `p.${t.page + 1}` : t.pages.length ? `${t.pages.length} pages` : 'document';
+    li.innerHTML = `<div class="res task new" style="--i:${k}">
+      <div class="thumb" data-open="${d.doc_id}" data-page="${page}" data-task="${t.id}"><img alt=""></div>
+      <div>
+        <a class="res-doc" data-doc="${d.doc_id}" data-open="${d.doc_id}" data-page="${page}" data-task="${t.id}">${esc(taskName(t.task))}<span class="faint"> · ${esc(d.title)}</span></a>
+        <div class="res-meta mono"><span>${esc(d.collection)}</span><span>${d.year ?? 's.d.'}</span><span>${where}</span>${t.n_figures ? `<span>${t.n_figures} crop${t.n_figures > 1 ? 's' : ''}</span>` : ''}<span>#${t.id}</span></div>
+        <div class="hits">${t.input ? `<div class="hit"><span class="pg mono" data-open="${d.doc_id}" data-page="${page}" data-task="${t.id}">input</span><span class="tx">${highlight(t.input, S.q)}</span></div>` : ''}
+          <div class="hit"><span class="pg mono" data-open="${d.doc_id}" data-page="${page}" data-task="${t.id}">target</span><span class="tx">${highlight(t.target, S.q)}</span></div></div>
+      </div></div>`;
+    lazyImg($('img', li), t.n_figures ? `/api/task/${t.id}/crop/0.jpg` : pageSrc(d.doc_id, page, 96));
+    frag.appendChild(li);
+  });
+  ol.appendChild(frag);
+}
+
+async function loadTaskTypes() {   // the Tasks mode only appears once tasks have been imported (pdfatlas.tasks)
+  const r = await api('/api/tasks/types').catch(() => ({types: []}));
+  if (!r.types.length) return;
+  $('#modes [data-m="tasks"]').hidden = false;
+  if (S.topics.tasks) $('#mapkind [data-k="tasks"]').hidden = false;   // after `pdfatlas.tasks --map`
+  $('#f-task').innerHTML = '<option value="">All</option>' +
+    r.types.map(x => `<option value="${esc(x.task)}">${esc(taskName(x.task))} (${fmt(x.n)})</option>`).join('');
+  $('#f-task').value = S.task || '';
+}
+
 function filtersChanged() {
   S.filt = {collection: $('#f-coll').value, topic: $('#f-topic').value, yf: $('#f-y0').value.trim(), yt: $('#f-y1').value.trim()};
   $('#f-clear').hidden = !Object.values(S.filt).some(v => v !== '');
@@ -673,6 +727,7 @@ function setMode(m) {
   $$('#modes button').forEach(b => b.setAttribute('aria-selected', b.dataset.m === m));
   if ((m === 'image') !== (S.lastTopicKind === 'image')) { $('#f-topic').value = ''; S.filt.topic = ''; }
   S.lastTopicKind = m === 'image' ? 'image' : 'text';
+  $('#f-taskwrap').hidden = m !== 'tasks';
   fillFilters();
   newSearch();
 }
@@ -804,11 +859,15 @@ const Viewer = (() => {
     lazyImg($('img', e.target), pageSrc(doc.doc_id, +e.target.dataset.p, 80));
   }), {root: $('#v-strip'), rootMargin: '400px'});
 
-  async function open(id, p = 0, hits = []) {
+  let task = null;   // the DocMaestro task shown in the side panel (opened from the tasks map / search, or the list)
+  async function open(id, p = 0, hits = [], taskId = null) {
     V.hidden = false; requestAnimationFrame(() => V.classList.add('on'));
     document.body.style.overflow = 'hidden';
     $('#v-title').textContent = '…'; $('#v-strip').innerHTML = ''; $('#v-imgs').innerHTML = ''; $('#v-sim').innerHTML = '';
+    $('#v-tasks').innerHTML = ''; $('#v-taskcap').hidden = true; hideTask();
     try { doc = await api(`/api/doc/${id}`); } catch (e) { $('#v-title').textContent = 'Not indexed yet'; return; }
+    loadTasks(doc.doc_id);
+    if (taskId != null) showTask(taskId);
     hitPages = new Set(hits);
     $('#v-sub').textContent = `${doc.collection} · ${doc.year ?? 's.d.'} · ${fmt(doc.n_pages)} pages · ${fmt(doc.n_images)} figures · #${doc.doc_id}`;
     $('#v-title').textContent = doc.title;
@@ -839,6 +898,47 @@ const Viewer = (() => {
     api(`/api/search?mode=docs&like_doc=${doc.doc_id}&limit=10`).then(r => {
       $('#v-sim').innerHTML = r.items.map(it => `<li data-open="${it.doc.doc_id}">${esc(it.doc.title)}<span class="mono">${esc(it.doc.collection)} · ${it.doc.year ?? 's.d.'} · ${it.score}</span></li>`).join('');
     }).catch(() => {});
+  }
+
+  // ---- DocMaestro tasks of this document
+  const pretty = s => { try { return JSON.stringify(JSON.parse(s), null, 1); } catch { return s; } };
+  async function showTask(tid) {
+    let t;
+    try { t = await api(`/api/task/${tid}`); } catch { return; }
+    if (!doc || t.doc_id !== doc.doc_id) return;
+    task = t;
+    const box = $('#v-task'), pg = t.page >= 0 ? t.page : (t.pages[0] ?? 0);
+    const where = t.page >= 0 ? `p.${t.page + 1}` : t.pages.length ? `pages ${t.pages.map(x => x + 1).join(', ')}` : 'whole document';
+    box.innerHTML = `<header><div><b>${esc(taskName(t.task))}</b> <span class="mono faint">${where} · #${t.id}</span></div>
+        <button class="mono" id="v-taskclose" title="Close the task">✕</button></header>
+      ${t.n_figures ? `<div class="mono lab">figure${t.n_figures > 1 ? 's' : ''} given to the model</div><div class="crops"></div>` : ''}
+      <div class="mono lab">input</div><pre>${esc(pretty(t.input)) || '<span class="faint">(the page image only)</span>'}</pre>
+      <div class="mono lab">target</div><pre>${esc(pretty(t.target))}</pre>`;
+    for (let k = 0; k < Math.min(t.n_figures, 12); k++) $('.crops', box).appendChild(lazyImg(new Image(), `/api/task/${t.id}/crop/${k}.jpg`));
+    $('#v-taskclose').onclick = hideTask;
+    box.hidden = false; $('.v-side').scrollTop = 0;
+    $$('#v-tasks button').forEach(b => b.classList.toggle('cur', +b.dataset.task === t.id));
+    if (pg !== page) go(pg); else boxes();
+  }
+  function hideTask() { task = null; $('#v-task').hidden = true; $('#v-task').innerHTML = ''; $$('#v-tasks button.cur').forEach(b => b.classList.remove('cur')); if (doc) boxes(); }
+
+  async function loadTasks(docId) {
+    let r;
+    try { r = await api(`/api/doc/${docId}/tasks`); } catch { return; }
+    if (!doc || doc.doc_id !== docId || !r.total) return;
+    const cap = $('#v-taskcap'); cap.hidden = false;
+    cap.textContent = `Tasks from this document (${fmt(r.total)})`;
+    const by = {};
+    r.items.forEach(it => (by[it.task] ||= []).push(it));
+    const box = $('#v-tasks');
+    box.innerHTML = r.types.map(t => `<details data-type="${esc(t.task)}"><summary><span>${esc(taskName(t.task))}</span><span class="mono">${fmt(t.n)}</span></summary></details>`).join('');
+    $$('details', box).forEach(d => d.addEventListener('toggle', () => {   // items built on first open: some documents have thousands
+      if (!d.open || d.dataset.built) return;
+      d.dataset.built = 1;
+      d.insertAdjacentHTML('beforeend', (by[d.dataset.type] || []).map(it =>
+        `<button data-task="${it.id}" class="${task && task.id === it.id ? 'cur' : ''}"><span class="mono">${it.page >= 0 ? 'p.' + (it.page + 1) : 'doc'}</span>${esc(it.preview || '(no text)')}</button>`).join(''));
+    }));
+    box.onclick = e => { const b = e.target.closest('[data-task]'); if (b) showTask(+b.dataset.task); };
   }
 
   function renderLabels() {
@@ -883,7 +983,9 @@ const Viewer = (() => {
     bx.style.left = img.offsetLeft + 'px'; bx.style.top = img.offsetTop + 'px';
     bx.style.width = img.clientWidth + 'px'; bx.style.height = img.clientHeight + 'px';
     bx.innerHTML = doc.images.filter(i => i.page === page).map(i =>
-      `<i data-likeimg="${i.id}" title="Find similar figures" style="left:${i.x0 * 100}%;top:${i.y0 * 100}%;width:${(i.x1 - i.x0) * 100}%;height:${(i.y1 - i.y0) * 100}%"></i>`).join('');
+      `<i data-likeimg="${i.id}" title="Find similar figures" style="left:${i.x0 * 100}%;top:${i.y0 * 100}%;width:${(i.x1 - i.x0) * 100}%;height:${(i.y1 - i.y0) * 100}%"></i>`).join('') +
+      (task && task.region && task.page === page ? (([x0, y0, x1, y1]) =>
+        `<i class="treg" style="left:${x0 * 100}%;top:${y0 * 100}%;width:${(x1 - x0) * 100}%;height:${(y1 - y0) * 100}%"></i>`)(task.region) : '');
   }
 
   async function text() {
@@ -924,7 +1026,7 @@ document.addEventListener('click', e => {
     const docId = +o.dataset.open, pg = +(o.dataset.page || 0);
     const res = o.closest('.res');
     const hits = res ? $$('.pg', res).map(x => +x.dataset.page) : [];
-    Viewer.open(docId, pg, hits);
+    Viewer.open(docId, pg, hits, o.dataset.task ? +o.dataset.task : null);
     return;
   }
   const tp = e.target.closest('.topic');
@@ -949,6 +1051,7 @@ $('#q').addEventListener('input', () => {
 $('#qform').addEventListener('submit', e => { e.preventDefault(); clearTimeout(qT); S.q = $('#q').value.trim(); S.like = null; newSearch(); $('#q').blur(); });
 $$('#modes button').forEach(b => b.onclick = () => setMode(b.dataset.m));
 ['#f-coll', '#f-topic'].forEach(s => $(s).onchange = filtersChanged);
+$('#f-task').onchange = () => { S.task = $('#f-task').value; newSearch(); };
 ['#f-y0', '#f-y1'].forEach(s => $(s).addEventListener('change', filtersChanged));
 $('#f-clear').onclick = () => { $('#f-coll').value = ''; $('#f-topic').value = ''; $('#f-y0').value = ''; $('#f-y1').value = ''; filtersChanged(); };
 $$('#topickind button').forEach(b => b.onclick = () => { $$('#topickind button').forEach(x => x.setAttribute('aria-pressed', x === b)); topicKind = b.dataset.k; renderTopics(); });
@@ -967,9 +1070,10 @@ window.addEventListener('resize', () => { clearTimeout(window._rt); window._rt =
 // boot: restore URL state
 const u = new URLSearchParams(location.search);
 S.q = u.get('q') || ''; $('#q').value = S.q;
+S.task = u.get('task') || '';
 for (const k of ['collection', 'topic', 'yf', 'yt']) if (u.get(k)) S.filt[k] = u.get(k);
 $('#modehint').textContent = HINT.semantic;
-loadStats().then(() => {
+loadStats().then(loadTaskTypes).then(() => {
   $('#f-coll').value = S.filt.collection; $('#f-topic').value = S.filt.topic; $('#f-y0').value = S.filt.yf; $('#f-y1').value = S.filt.yt;
   setMode(u.get('mode') || 'semantic');
   Browse.reset();
